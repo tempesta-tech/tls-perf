@@ -3,9 +3,6 @@
  *
  * Copyright (C) 2020 Tempesta Technologies, INC.
  *
- * Based on THC-SSL-DOS by The Hacker's Choice, forked from
- * https://github.com/azet/thc-tls-dos
- *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License,
@@ -47,24 +44,25 @@
 static const int DEFAULT_THREADS = 1;
 static const int PEERS_SLOW_START = 10;
 static const int DEFAULT_PEERS = 1;
-static const char *DEFAULT_CIPHER = "ECDHE-RSA-AES256-GCM-SHA384";
+static const char *DEFAULT_CIPHER = "ECDHE-ECDSA-AES128-GCM-SHA256";
 
 struct {
 	typedef std::chrono::time_point<std::chrono::steady_clock> __time_t;
 
-	__time_t		start_time;
+	std::atomic<uint32_t>	total_tcp_connections;
+	std::atomic<uint32_t>	tls_connections;
+	std::atomic<uint32_t>	error_count;
+	std::atomic<uint32_t>	epoch_start_tcp_connections;
 
-	std::atomic_uint32_t	total_tcp_connections;
-	std::atomic_uint32_t	tls_connections;
-	std::atomic_uint32_t	error_count;
-	std::atomic_uint32_t	epoch_start_tcp_connections;
-} stat;
+	__time_t		start_time;
+} stat __attribute__((aligned(L1DSZ))); // no split-locking
 
 struct {
 	int		n_peers;
 	int		n_threads;
 	uint32_t	ip;
 	uint16_t	port;
+	bool		debug;
 	const char	*cipher;
 } g_opt;
 
@@ -74,7 +72,7 @@ private:
 	std::string str_;
 
 public:
-	Except(const char* fmt, ...) throw()
+	Except(const char* fmt, ...) noexcept
 	{
 		va_list ap;
 		char msg[maxmsg];
@@ -100,21 +98,22 @@ public:
 		}
 
 		// Add call trace symbols.
-		call_trace();
+		if (g_opt.debug)
+			call_trace();
 	}
 
-	~Except() throw()
+	~Except() noexcept
 	{}
 
 	const char *
-	what() const throw()
+	what() const noexcept
 	{
 		return str_.c_str();
 	}
 
 private:
 	void
-	call_trace() throw()
+	call_trace() noexcept
 	{
 		// Do not print more that BTRACE_CALLS_NUM calls in the trace.
 		static const size_t BTRACE_CALLS_NUM	= 32;
@@ -138,7 +137,7 @@ private:
 
 struct SocketHandler {
 	virtual ~SocketHandler() {};
-	virtual bool next_state() = 0;
+	virtual bool next_state() =0;
 
 	int sd;
 };
@@ -153,14 +152,14 @@ public:
 	{
 		tls_ = SSL_CTX_new(TLS_client_method());
 
-		/* Limit to TLSv1.2 at the moment. */
+		// Limit to TLSv1.2 at the moment.
 		SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
 		SSL_CTX_set_max_proto_version(tls_, TLS1_2_VERSION);
 
-		/* No session resumption. */
+		// No session resumption.
 		SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
 
-		/* Use SSL_CTX_set_ciphersuites() for TLSv1.3. */
+		// Use SSL_CTX_set_ciphersuites() for TLSv1.3.
 		SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
 
 		if ((ed_ = epoll_create(1)) < 0)
@@ -183,14 +182,14 @@ public:
 		};
 
 		if (epoll_ctl(ed_, EPOLL_CTL_ADD, sh->sd, &ev) < 0)
-			throw std::string("can't add socket to poller");
+			throw Except("can't add socket to poller");
 	}
 
 	void
 	del(SocketHandler *sh)
 	{
 		if (epoll_ctl(ed_, EPOLL_CTL_DEL, sh->sd, NULL) < 0)
-			throw std::string("can't delete socket from poller");
+			throw Except("can't delete socket from poller");
 	}
 
 	void
@@ -201,12 +200,12 @@ public:
 		if (ev_count_ < 0) {
 			if (errno == EINTR)
 				goto retry;
-			throw std::string("poller wait error");
+			throw Except("poller wait error");
 		}
 	}
 
 	SocketHandler *
-	next_sk()
+	next_sk() noexcept
 	{
 		if (ev_count_ <= 0)
 			return NULL;
@@ -217,6 +216,8 @@ public:
 	new_tls_ctx(SocketHandler *sh)
 	{
 		SSL *ctx = SSL_new(tls_);
+		if (!ctx)
+			throw Except("cannot clone TLS context");
 
 		SSL_set_fd(ctx, sh->sd);
 
@@ -233,7 +234,6 @@ private:
 class Peer : public SocketHandler {
 private:
 	enum _states {
-		__STATE_BAD,
 		STATE_TCP_CONNECT,
 		STATE_TCP_CONNECTING,
 		STATE_TLS_HANDSHAKING,
@@ -244,11 +244,12 @@ private:
 	SSL			*tls_;
 	enum _states		state_;
 	struct sockaddr_in	addr_;
+	bool			polled_;
 
 public:
-	Peer(IO &io)
+	Peer(IO &io) noexcept
 		: io_(io), tls_(NULL)
-		, state_(STATE_TCP_CONNECT)
+		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
 		sd = -1;
 		::memset(&addr_, 0, sizeof(addr_));
@@ -263,7 +264,7 @@ public:
 	}
 
 	bool
-	next_state()
+	next_state() final override
 	{
 		switch (state_) {
 		case STATE_TCP_CONNECT:
@@ -281,6 +282,24 @@ public:
 
 private:
 	void
+	add_to_poll()
+	{
+		if (!polled_) {
+			io_.add(this);
+			polled_ = true;
+		}
+	}
+
+	void
+	del_from_poll()
+	{
+		if (polled_) {
+			io_.del(this);
+			polled_ = false;
+		}
+	}
+
+	void
 	tls_handshake()
 	{
 		state_ = STATE_TLS_HANDSHAKING;
@@ -290,7 +309,7 @@ private:
 
 		int r = SSL_connect(tls_);
 		if (r == 1) {
-			/* Handshake completed. */
+			// Handshake completed.
 			stat.tls_connections++;
 			disconnect();
 			tcp_connect();
@@ -300,7 +319,7 @@ private:
 		switch (SSL_get_error(tls_, r)) {
 		case SSL_ERROR_WANT_READ:
 		case SSL_ERROR_WANT_WRITE:
-			io_.add(this);
+			add_to_poll();
 			break;
 		default:
 			if (stat.tls_connections <= 0)
@@ -324,7 +343,6 @@ private:
 		if (!ret) {
 			// TCP connection established.
 			stat.total_tcp_connections++;
-			io_.add(this);
 			tls_handshake();
 			return true;
 		}
@@ -339,7 +357,7 @@ private:
 			return false;
 		}
 		// Continue to wait on TCP handshake.
-		io_.add(this);
+		add_to_poll();
 		return false;
 	}
 
@@ -359,7 +377,7 @@ private:
 	}
 
 	void
-	disconnect()
+	disconnect() noexcept
 	{
 		if (tls_) {
 			// Make sure session is not kept in cache.
@@ -369,7 +387,13 @@ private:
 			tls_ = NULL;
 		}
 		if (sd >= 0) {
-			io_.del(this);
+			try {
+				del_from_poll();
+			}
+			catch (Except &e) {
+				std::cerr << "ERROR disconnect: "
+					<< e.what() << std::endl;
+			}
 
 			// Disable TIME-WAIT state, close immediately.
 			struct linger sl = { .l_onoff = 1, .l_linger = 0 };
@@ -389,7 +413,8 @@ usage()
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
-		<< "  -h           Print this help and exit.\n"
+		<< "  -h,--help    Print this help and exit.\n"
+		<< "  -d,--debug   Run in debug mode.\n"
 		<< "  -l <n>       Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ").\n"
 		<< "  -t <n>       Number of threads"
@@ -397,7 +422,7 @@ usage()
 		<< "  -c <cipher>  Force cipher choice (default: "
 		<< DEFAULT_CIPHER << ").\n"
 		<< "\n"
-		<< "127.0.0.1:443 address is used by default."
+		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
 		<< "To list available ciphers run command:\n"
 		<< "$ nmap --script ssl-enum-ciphers -p <PORT> <IP>\n"
@@ -415,13 +440,23 @@ do_getopt(int argc, char *argv[])
 	g_opt.port = htons(443);
 	g_opt.ip = inet_addr("127.0.0.1");
 	g_opt.cipher = DEFAULT_CIPHER;
+	g_opt.debug = false;
 
-	while ((c = getopt_long(argc, argv, "hl:c:t:", NULL, &o)) != -1) {
+	static struct option long_opts[] = {
+		{"help", no_argument, NULL, 'h'},
+		{"debug", no_argument, NULL, 'd'},
+		{0, 0, 0, 0}
+	};
+
+	while ((c = getopt_long(argc, argv, "hl:c:dt:", long_opts, &o)) != -1) {
 		switch (c) {
 		case 0:
 			break;
 		case 'c':
 			g_opt.cipher = optarg;
+			break;
+		case 'd':
+			g_opt.debug = true;
 			break;
 		case 'l':
 			g_opt.n_peers = atoi(optarg);
@@ -435,8 +470,11 @@ do_getopt(int argc, char *argv[])
 		}
 	}
 
-	if (optind >= argc)
+	if (optind != argc && optind + 2 != argc) {
+		std::cerr << "\nERROR: need to specify both the address"
+			<< " and port or use default values" << std::endl;
 		usage();
+	}
 
 	i = optind;
 	if (i < argc) {
@@ -450,7 +488,7 @@ do_getopt(int argc, char *argv[])
 }
 
 void
-statistics_update()
+statistics_update() noexcept
 {
 	using namespace std::chrono;
 
@@ -471,7 +509,7 @@ statistics_update()
 }
 
 void
-run_workload()
+io_loop()
 {
 	int active_peers = 0;
 	int new_peers = std::min(g_opt.n_peers, PEERS_SLOW_START);
@@ -512,8 +550,18 @@ main(int argc, char *argv[])
 
 	std::cout << "Use cipher '" << g_opt.cipher << "'" << std::endl;
 
-	for (auto i = 0; i < g_opt.n_threads; ++i)
-		std::thread(run_workload).detach();
+	for (auto i = 0; i < g_opt.n_threads; ++i) {
+		std::cout << "spawn thread " << (i + 1) << std::endl;
+		std::thread([]() {
+			try {
+				io_loop();
+			}
+			catch (Except &e) {
+				std::cerr << "ERROR: " << e.what() << std::endl;
+				exit(1);
+			}
+		}).detach();
+	}
 
 	while (1) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));

@@ -15,15 +15,16 @@
 # Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 CXX		= g++
-CFLAGS		= -O2 -Wall
+CFLAGS		= -O2 -march=native -mtune=native -Wall \
+		  -DL1DSZ=$(shell getconf LEVEL1_DCACHE_LINESIZE)
 LDFLAGS		= -lpthread -lssl -lcrypto
 
 all : tls-perf
 
 tls-perf: main.o
-	$(CXX) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CXX) -o $@ $^ $(LDFLAGS)
 
-%.o: %.c
+%.o: %.cc
 	$(CXX) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 clean: FORCE
