@@ -532,7 +532,7 @@ do_getopt(int argc, char *argv[])
 	}
 }
 
-std::atomic<bool> finish(false);
+std::atomic<bool> finish(false), start_stats(false);
 
 void
 sig_handler(int signum)
@@ -591,6 +591,9 @@ statistics_update() noexcept
 		<< " [" << stat.tcp_handshakes << " hs in progress],"
 		<< " Errors " << stat.error_count << std::endl;
 
+	if (!start_stats)
+		return;
+
 	if (stat.max_hs < curr_hs)
 		stat.max_hs = curr_hs;
 	if (curr_hs && (stat.min_hs > curr_hs || !stat.min_hs))
@@ -648,9 +651,19 @@ io_loop()
 		}
 
 		io.wait();
-		while (auto p = io.next_sk())
-			if (p->next_state() && active_peers < g_opt.n_peers)
+		while (auto p = io.next_sk()) {
+			if (!p->next_state())
+				continue;
+
+			if (active_peers < g_opt.n_peers) {
 				++new_peers;
+			}
+			else if (!start_stats) {
+				start_stats = true;
+				std::cout << "( All peers are active, start to"
+					<< " gather statistics )" << std::endl;
+			}
+		}
 	}
 
 	for (auto p : all_peers)
