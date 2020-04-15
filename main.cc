@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <execinfo.h>
 #include <getopt.h>
+#include <sys/resource.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -30,41 +31,72 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <csignal>
 #include <chrono>
 #include <iostream>
 #include <list>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
 static const int DEFAULT_THREADS = 1;
-static const int PEERS_SLOW_START = 10;
 static const int DEFAULT_PEERS = 1;
+static const int PEERS_SLOW_START = 10;
 static const char *DEFAULT_CIPHER = "ECDHE-ECDSA-AES128-GCM-SHA256";
 
 struct {
 	typedef std::chrono::time_point<std::chrono::steady_clock> __time_t;
 
-	std::atomic<uint32_t>	total_tcp_connections;
-	std::atomic<uint32_t>	tls_connections;
-	std::atomic<uint32_t>	error_count;
-	std::atomic<uint32_t>	epoch_start_tcp_connections;
+	std::atomic<int32_t>	tcp_handshakes;
+	std::atomic<int32_t>	tcp_connections;
+	std::atomic<int32_t>	tls_connections;
+	std::atomic<int32_t>	tls_handshakes;
+	std::atomic<int32_t>	error_count;
+	int32_t			__no_false_sharing[11];
 
-	__time_t		start_time;
+	__time_t		stat_time;
+
+	int32_t			measures;
+	int32_t			max_hs;
+	int32_t			min_hs;
+	int32_t			avg_hs;
+	std::vector<int32_t>	hs_history;
 } stat __attribute__((aligned(L1DSZ))); // no split-locking
 
 struct {
 	int		n_peers;
 	int		n_threads;
+	int		timeout;
 	uint32_t	ip;
 	uint16_t	port;
 	bool		debug;
 	const char	*cipher;
 } g_opt;
+
+struct DbgStream {
+	template<typename T>
+	const DbgStream &
+	operator<<(const T &v) const
+	{
+		if (g_opt.debug)
+			std::cout << v;
+		return *this;
+	}
+
+	const DbgStream &
+	operator<<(std::ostream &(*manip)(std::ostream &)) const
+	{
+		if (g_opt.debug)
+			manip(std::cout);
+		return *this;
+	}
+} dbg;
 
 class Except : public std::exception {
 private:
@@ -96,10 +128,6 @@ public:
 			str_ += std::string(": ")
 				+ ERR_error_string(ossl_err, buf);
 		}
-
-		// Add call trace symbols.
-		if (g_opt.debug)
-			call_trace();
 	}
 
 	~Except() noexcept
@@ -109,29 +137,6 @@ public:
 	what() const noexcept
 	{
 		return str_.c_str();
-	}
-
-private:
-	void
-	call_trace() noexcept
-	{
-		// Do not print more that BTRACE_CALLS_NUM calls in the trace.
-		static const size_t BTRACE_CALLS_NUM	= 32;
-
-		void *trace_addrs[BTRACE_CALLS_NUM];
-		int n_addr = backtrace(trace_addrs,
-				sizeof(trace_addrs) / sizeof(trace_addrs[0]));
-		if (!n_addr)
-			return;
-
-		char **btrace = backtrace_symbols(trace_addrs, n_addr);
-		if (!btrace)
-			return;
-
-		for (auto i = 0; i < n_addr; ++i)
-			str_ += std::string("\n\t") + btrace[i];
-
-		free(btrace);
 	}
 };
 
@@ -149,6 +154,7 @@ private:
 
 public:
 	IO()
+		: ed_(-1), ev_count_(0), tls_(NULL)
 	{
 		tls_ = SSL_CTX_new(TLS_client_method());
 
@@ -169,8 +175,9 @@ public:
 
 	~IO()
 	{
-		if (ed_)
+		if (ed_ > -1)
 			close(ed_);
+		reconnect_q_.clear();
 	}
 
 	void
@@ -193,6 +200,12 @@ public:
 	}
 
 	void
+	queue_reconnect(SocketHandler *sh) noexcept
+	{
+		reconnect_q_.push_back(sh);
+	}
+
+	void
 	wait()
 	{
 	retry:
@@ -207,9 +220,16 @@ public:
 	SocketHandler *
 	next_sk() noexcept
 	{
-		if (ev_count_ <= 0)
-			return NULL;
-		return (SocketHandler *)events_[--ev_count_].data.ptr;
+		if (ev_count_)
+			return (SocketHandler *)events_[--ev_count_].data.ptr;
+
+		if (!reconnect_q_.empty()) {
+			SocketHandler *sh = reconnect_q_.front();
+			reconnect_q_.pop_front();
+			return sh;
+		}
+
+		return NULL;
 	}
 
 	SSL *
@@ -225,10 +245,11 @@ public:
 	}
 
 private:
-	int		ed_;
-	int		ev_count_;
-	SSL_CTX		*tls_;
-	struct epoll_event events_[N_EVENTS];
+	int			ed_;
+	int			ev_count_;
+	SSL_CTX			*tls_;
+	struct epoll_event	events_[N_EVENTS];
+	std::list<SocketHandler *> reconnect_q_;
 };
 
 class Peer : public SocketHandler {
@@ -251,6 +272,8 @@ public:
 		: io_(io), tls_(NULL)
 		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
+		dbg << "create new peer" << std::endl;
+
 		sd = -1;
 		::memset(&addr_, 0, sizeof(addr_));
 		addr_.sin_family = AF_INET;
@@ -304,15 +327,20 @@ private:
 	{
 		state_ = STATE_TLS_HANDSHAKING;
 
-		if (!tls_)
+		if (!tls_) {
 			tls_ = io_.new_tls_ctx(this);
+			stat.tls_handshakes++;
+		}
 
 		int r = SSL_connect(tls_);
+
 		if (r == 1) {
 			// Handshake completed.
+			stat.tls_handshakes--;
 			stat.tls_connections++;
 			disconnect();
-			tcp_connect();
+			stat.tcp_connections--;
+			io_.queue_reconnect(this);
 			return;
 		}
 
@@ -322,11 +350,13 @@ private:
 			add_to_poll();
 			break;
 		default:
-			if (stat.tls_connections <= 0)
+			if (!stat.tls_connections)
 				throw Except("cannot establish even one TLS"
 					     " connection");
+			stat.tls_handshakes--;
 			stat.error_count++;
 			disconnect();
+			stat.tcp_connections--;
 		}
 	}
 
@@ -342,7 +372,8 @@ private:
 
 		if (!ret) {
 			// TCP connection established.
-			stat.total_tcp_connections++;
+			stat.tcp_handshakes--;
+			stat.tcp_connections++;
 			tls_handshake();
 			return true;
 		}
@@ -350,9 +381,10 @@ private:
 		// Some error on the socket.
 		state_ = STATE_TCP_CONNECTING;
 		if (errno != EINPROGRESS && errno != EAGAIN) {
-			if (stat.total_tcp_connections <= 0)
+			if (!stat.tcp_connections)
 				throw Except("cannot establish even one"
 					     " TCP connection");
+			stat.tcp_handshakes--;
 			disconnect();
 			return false;
 		}
@@ -370,6 +402,8 @@ private:
 		fcntl(sd, F_SETFL, fcntl(sd, F_GETFL, 0) | O_NONBLOCK);
 
 		int r = connect(sd, (struct sockaddr *)&addr_, sizeof(addr_));
+
+		stat.tcp_handshakes++;
 
 		// On on localhost connect() can complete instantly
 		// even on non-blocking sockets.
@@ -404,7 +438,6 @@ private:
 		}
 
 		state_ = STATE_TCP_CONNECT;
-		stat.tls_connections--;
 	}
 };
 
@@ -419,6 +452,7 @@ usage()
 		<< " (default: " << DEFAULT_PEERS << ").\n"
 		<< "  -t <n>       Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
+		<< "  -T,--to      Duration of the test (in secodns)\n"
 		<< "  -c <cipher>  Force cipher choice (default: "
 		<< DEFAULT_CIPHER << ").\n"
 		<< "\n"
@@ -441,14 +475,17 @@ do_getopt(int argc, char *argv[])
 	g_opt.ip = inet_addr("127.0.0.1");
 	g_opt.cipher = DEFAULT_CIPHER;
 	g_opt.debug = false;
+	g_opt.timeout = 0;
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"debug", no_argument, NULL, 'd'},
+		{"to", no_argument, NULL, 'T'},
 		{0, 0, 0, 0}
 	};
 
-	while ((c = getopt_long(argc, argv, "hl:c:dt:", long_opts, &o)) != -1) {
+	while ((c = getopt_long(argc, argv, "hl:c:dt:T:", long_opts, &o)) != -1)
+	{
 		switch (c) {
 		case 0:
 			break;
@@ -463,6 +500,14 @@ do_getopt(int argc, char *argv[])
 			break;
 		case 't':
 			g_opt.n_threads = atoi(optarg);
+			if (g_opt.n_threads > 512) {
+				std::cerr << "ERROR: too many threads requested"
+					<< std::endl;
+				exit(2);
+			}
+			break;
+		case 'T':
+			g_opt.timeout = atoi(optarg);
 			break;
 		case 'h':
 		default:
@@ -487,25 +532,92 @@ do_getopt(int argc, char *argv[])
 	}
 }
 
+std::atomic<bool> finish(false);
+
+void
+sig_handler(int signum)
+{
+	finish = true;
+}
+
+void
+update_limits()
+{
+	struct rlimit open_file_limit = {};
+	// Set limit for all the peer sockets + epoll socket for
+	// each thread + standard IO.
+	rlim_t req_fd_n = (g_opt.n_peers + 4) * g_opt.n_threads;
+
+	getrlimit(RLIMIT_NOFILE, &open_file_limit);
+	if (open_file_limit.rlim_cur > req_fd_n)
+		return;
+
+	std::cout << "set open files limit to " << req_fd_n << std::endl;
+	open_file_limit.rlim_cur = req_fd_n;
+	if (setrlimit(RLIMIT_NOFILE, &open_file_limit)) {
+		g_opt.n_peers = open_file_limit.rlim_cur / (g_opt.n_threads + 4);
+		std::cerr << "WARNING: required " << req_fd_n
+			<< " (peers_number * threads_number), but setrlimit(2)"
+			   " fails for this rlimit. Try to run as root or"
+			   " decrease the numbers. Continue with "
+			<< g_opt.n_peers << " peers" << std::endl;
+		if (!g_opt.n_peers) {
+			std::cerr << "ERROR: cannot run with no peers"
+				<< std::endl;
+			exit(3);
+		}
+	}
+}
+
 void
 statistics_update() noexcept
 {
 	using namespace std::chrono;
 
-	auto total = &stat.total_tcp_connections;
-	auto epoch = &stat.epoch_start_tcp_connections;
-	auto delta = *total - *epoch;
+	stat.measures++;
+
+	auto tls_conns = stat.tls_connections.load();
 
 	auto now(steady_clock::now());
-	auto dt = duration_cast<milliseconds>(now - stat.start_time).count();
+	auto dt = duration_cast<milliseconds>(now - stat.stat_time).count();
 
-	std::cout << "Handshakes " << *total
-		<< " [" << (float)(1000 * delta) / dt << " h/s], "
-		<< stat.tls_connections << " Conn, "
-		<< stat.error_count << " Err" << std::endl;
+	stat.stat_time = now;
+	stat.tls_connections -= tls_conns;
 
-	epoch->store(*total);
-	stat.start_time = now;
+	int32_t curr_hs = (size_t)(1000 * tls_conns) / dt;
+	std::cout << "TLS hs in progress " << stat.tls_handshakes
+		<< " [" << curr_hs << " h/s],"
+		<< " TCP open conns " << stat.tcp_connections
+		<< " [" << stat.tcp_handshakes << " hs in progress],"
+		<< " Errors " << stat.error_count << std::endl;
+
+	if (stat.max_hs < curr_hs)
+		stat.max_hs = curr_hs;
+	if (curr_hs && (stat.min_hs > curr_hs || !stat.min_hs))
+		stat.min_hs = curr_hs;
+	stat.avg_hs = (stat.avg_hs * (stat.measures - 1) + curr_hs)
+			/ stat.measures;
+	if (stat.hs_history.size() == 3600)
+		std::cerr << "WARNING: benchmark is running for too long"
+			<< " last history won't be stored" << std::endl;
+	if (stat.hs_history.size() <= 3600)
+		stat.hs_history.push_back(curr_hs);
+}
+
+void
+statistics_dump() noexcept
+{
+	// Do this only once at the end of program, so sorting isn't a big deal.
+	std::sort(stat.hs_history.begin(), stat.hs_history.end(),
+		  std::less<int32_t>());
+	auto hsz = stat.hs_history.size();
+
+	std::cout << "MEASURES (seconds) " << stat.measures
+		<< "; MAX h/s " << stat.max_hs
+		<< "; 99P h/s " << stat.hs_history[hsz * 99 / 100]
+		<< "; 95P h/s " << stat.hs_history[hsz * 95 / 100]
+		<< "; AVG h/s " << stat.avg_hs
+		<< "; MIN h/s " << stat.min_hs << std::endl;
 }
 
 void
@@ -516,16 +628,23 @@ io_loop()
 	IO io;
 	std::list<SocketHandler *> all_peers;
 
-	while (1) {
+	while (!finish) {
 		// We implement slow start of number of concurrent TCP
 		// connections, so active_peers and peers dynamicly grow in
 		// this loop.
-		while (new_peers--) {
+		for ( ; new_peers; --new_peers) {
 			Peer *p = new Peer(io);
 			all_peers.push_back(p);
 			++active_peers;
-			if (p->next_state() && active_peers < g_opt.n_peers)
-				++new_peers;
+
+			if (p->next_state()) {
+				if (active_peers + new_peers < g_opt.n_peers) {
+					++new_peers;
+				} else {
+					new_peers = 0;
+					break;
+				}
+			}
 		}
 
 		io.wait();
@@ -534,8 +653,6 @@ io_loop()
 				++new_peers;
 	}
 
-	// At the moment we never reach the point, but call the peer
-	// destructor if we come to time limited benchmarking.
 	for (auto p : all_peers)
 		delete p;
 }
@@ -543,16 +660,23 @@ io_loop()
 int
 main(int argc, char *argv[])
 {
+	using namespace std::chrono;
+
 	do_getopt(argc, argv);
+	update_limits();
+
+	signal(SIGTERM, sig_handler);
+	signal(SIGINT, sig_handler);
 
 	SSL_library_init();
 	SSL_load_error_strings();
 
 	std::cout << "Use cipher '" << g_opt.cipher << "'" << std::endl;
 
+	std::vector<std::thread> thr(g_opt.n_threads);
 	for (auto i = 0; i < g_opt.n_threads; ++i) {
-		std::cout << "spawn thread " << (i + 1) << std::endl;
-		std::thread([]() {
+		dbg << "spawn thread " << (i + 1) << std::endl;
+		thr[i] = std::thread([]() {
 			try {
 				io_loop();
 			}
@@ -560,13 +684,24 @@ main(int argc, char *argv[])
 				std::cerr << "ERROR: " << e.what() << std::endl;
 				exit(1);
 			}
-		}).detach();
+		});
 	}
 
-	while (1) {
+	auto start_t(steady_clock::now());
+	while (!finish) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		statistics_update();
+
+		auto now(steady_clock::now());
+		auto dt = duration_cast<seconds>(now - start_t).count();
+		if (g_opt.timeout && g_opt.timeout <= dt)
+			finish = true;
 	}
+
+	for (auto &t : thr)
+		t.join();
+
+	statistics_dump();
 
 	return 0;
 }
