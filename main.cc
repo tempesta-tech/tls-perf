@@ -114,7 +114,7 @@ public:
 		str_ = msg;
 
 		// Add system error code (errno).
-		if (errno) {
+		if (errno && errno != EINPROGRESS && errno != EAGAIN) {
 			std::stringstream ss;
 			ss << " (" << strerror(errno)
 				<< ", errno=" << errno << ")";
@@ -380,10 +380,15 @@ private:
 
 		// Some error on the socket.
 		state_ = STATE_TCP_CONNECTING;
-		if (errno != EINPROGRESS && errno != EAGAIN) {
-			if (!stat.tcp_connections)
-				throw Except("cannot establish even one"
-					     " TCP connection");
+		if ((errno != EINPROGRESS && errno != EAGAIN) || ret) {
+			if (!stat.tcp_connections) {
+				std::stringstream ss;
+				ss << "cannot establish even one TCP connection";
+				if (ret)
+					ss << " (" << strerror(ret)
+					   << ", errno=" << errno << ")";
+				throw Except(ss.str().c_str());
+			}
 			stat.tcp_handshakes--;
 			disconnect();
 			return false;
