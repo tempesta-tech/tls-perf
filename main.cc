@@ -452,7 +452,7 @@ usage()
 		<< " (default: " << DEFAULT_PEERS << ").\n"
 		<< "  -t <n>       Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
-		<< "  -T,--to      Duration of the test (in secodns)\n"
+	    << "  -T,--to      Duration of the test (in seconds)\n"
 		<< "  -c <cipher>  Force cipher choice (default: "
 		<< DEFAULT_CIPHER << ").\n"
 		<< "\n"
@@ -633,7 +633,7 @@ io_loop()
 
 	while (!finish) {
 		// We implement slow start of number of concurrent TCP
-		// connections, so active_peers and peers dynamicly grow in
+		// connections, so active_peers and peers dynamically grow in
 		// this loop.
 		for ( ; new_peers; --new_peers) {
 			Peer *p = new Peer(io);
