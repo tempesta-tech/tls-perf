@@ -651,7 +651,9 @@ statistics_update() noexcept
 void
 statistics_dump() noexcept
 {
-	if (!start_stats) {
+	auto hsz = stat.hs_history.size();
+
+	if (!start_stats || hsz < 1) {
 		std::cerr << "ERROR: not enough statistics collected"
 			<< std::endl;
 		return;
@@ -660,7 +662,6 @@ statistics_dump() noexcept
 	// Do this only once at the end of program, so sorting isn't a big deal.
 	std::sort(stat.hs_history.begin(), stat.hs_history.end(),
 		  std::less<int32_t>());
-	auto hsz = stat.hs_history.size();
 
 	std::cout << "MEASURES (seconds) " << stat.measures
 		<< "; MAX h/s " << stat.max_hs
