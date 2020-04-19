@@ -88,7 +88,7 @@ struct {
 struct DbgStream {
 	template<typename T>
 	const DbgStream &
-	operator<<(const T &v) const
+	operator<<(const T &v) const noexcept
 	{
 		if (g_opt.debug)
 			std::cout << v;
@@ -96,7 +96,7 @@ struct DbgStream {
 	}
 
 	const DbgStream &
-	operator<<(std::ostream &(*manip)(std::ostream &)) const
+	operator<<(std::ostream &(*manip)(std::ostream &)) const noexcept
 	{
 		if (g_opt.debug)
 			manip(std::cout);
@@ -148,7 +148,7 @@ public:
 
 struct SocketHandler {
 	virtual ~SocketHandler() {};
-	virtual void next_state() =0;
+	virtual bool next_state() =0;
 
 	int sd;
 };
@@ -211,15 +211,6 @@ public:
 		reconnect_q_.push_back(sh);
 	}
 
-	// If we have something in the queue for the reconnection peers, then
-	// some peers have completed their handshakes and this means for the
-	// caller that we can do more connections.
-	bool
-	have_completed()
-	{
-		return !reconnect_q_.empty();
-	}
-
 	void
 	wait()
 	{
@@ -240,15 +231,21 @@ public:
 		return NULL;
 	}
 
+	void
+	backlog() noexcept
+	{
+		backlog_.swap(reconnect_q_);
+	}
+
 	SocketHandler *
 	next_backlog() noexcept
 	{
-		if (!reconnect_q_.empty()) {
-			SocketHandler *sh = reconnect_q_.front();
-			reconnect_q_.pop_front();
-			return sh;
-		}
-		return NULL;
+		if (backlog_.empty())
+			return NULL;
+
+		SocketHandler *sh = backlog_.front();
+		backlog_.pop_front();
+		return sh;
 	}
 
 	SSL *
@@ -269,6 +266,7 @@ private:
 	SSL_CTX			*tls_;
 	struct epoll_event	events_[N_EVENTS];
 	std::list<SocketHandler *> reconnect_q_;
+	std::list<SocketHandler *> backlog_;
 };
 
 class Peer : public SocketHandler {
@@ -305,22 +303,20 @@ public:
 		disconnect();
 	}
 
-	void
+	bool
 	next_state() final override
 	{
 		switch (state_) {
 		case STATE_TCP_CONNECT:
-			tcp_connect();
-			return;
+			return tcp_connect();
 		case STATE_TCP_CONNECTING:
-			tcp_connect_try_finish();
-			return;
+			return tcp_connect_try_finish();
 		case STATE_TLS_HANDSHAKING:
-			tls_handshake();
-			return;
+			return tls_handshake();
 		default:
 			throw Except("bad next state %d", state_);
 		}
+		return false;
 	}
 
 private:
@@ -343,13 +339,13 @@ private:
 	}
 
 	void
-	dbg_status(const char *msg)
+	dbg_status(const char *msg) noexcept
 	{
 		if (g_opt.debug)
 			dbg << "peer " << id_ << " " << msg << std::endl;
 	}
 
-	void
+	bool
 	tls_handshake()
 	{
 		state_ = STATE_TLS_HANDSHAKING;
@@ -368,7 +364,7 @@ private:
 			disconnect();
 			stat.tcp_connections--;
 			io_.queue_reconnect(this);
-			return;
+			return true;
 		}
 
 		switch (SSL_get_error(tls_, r)) {
@@ -385,15 +381,16 @@ private:
 			disconnect();
 			stat.tcp_connections--;
 		}
+		return false;
 	}
 
-	void
+	bool
 	handle_established_tcp_conn()
 	{
 		dbg_status("has established TCP connection");
 		stat.tcp_handshakes--;
 		stat.tcp_connections++;
-		tls_handshake();
+		return tls_handshake();
 	}
 
 	void
@@ -416,7 +413,7 @@ private:
 		disconnect();
 	}
 
-	void
+	bool
 	tcp_connect_try_finish()
 	{
 		int ret = 0;
@@ -425,13 +422,14 @@ private:
 		if (getsockopt(sd, SOL_SOCKET, SO_ERROR, &ret, &len))
 			throw Except("cannot get a socket connect() status");
 
-		if (ret)
-			handle_connect_error(ret);
-		else
-			handle_established_tcp_conn();
+		if (!ret)
+			return handle_established_tcp_conn();
+
+		handle_connect_error(ret);
+		return false;
 	}
 
-	void
+	bool
 	tcp_connect()
 	{
 		if ((sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
@@ -447,9 +445,10 @@ private:
 		// On on localhost connect() can complete instantly
 		// even on non-blocking sockets (Tempesta FW case).
 		if (!r)
-			handle_established_tcp_conn();
-		else
-			handle_connect_error(errno);
+			return handle_established_tcp_conn();
+
+		handle_connect_error(errno);
+		return false;
 	}
 
 	void
@@ -484,7 +483,7 @@ private:
 };
 
 void
-usage()
+usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
@@ -507,7 +506,7 @@ usage()
 }
 
 static void
-do_getopt(int argc, char *argv[])
+do_getopt(int argc, char *argv[]) noexcept
 {
 	int c, i, o = 0;
 
@@ -577,13 +576,13 @@ do_getopt(int argc, char *argv[])
 std::atomic<bool> finish(false), start_stats(false);
 
 void
-sig_handler(int signum)
+sig_handler(int signum) noexcept
 {
 	finish = true;
 }
 
 void
-update_limits()
+update_limits() noexcept
 {
 	struct rlimit open_file_limit = {};
 	// Set limit for all the peer sockets + epoll socket for
@@ -688,25 +687,27 @@ io_loop()
 			Peer *p = new Peer(io, active_peers++);
 			all_peers.push_back(p);
 
-			p->next_state();
-			if (!io.have_completed())
-				continue;
-
-			if (active_peers + new_peers < g_opt.n_peers) {
+			if (p->next_state()
+			    && active_peers + new_peers < g_opt.n_peers)
 				++new_peers;
-			}
 		}
 
 		io.wait();
-		while (auto p = io.next_sk())
-			p->next_state();
+		while (auto p = io.next_sk()) {
+			if (p->next_state()
+			    && active_peers + new_peers < g_opt.n_peers)
+				++new_peers;
+		}
 
 		// Process disconnected sockets from the backlog.
+		io.backlog();
 		while (!finish) {
 			auto p = io.next_backlog();
 			if (!p)
 				break;
-			p->next_state();
+			if (p->next_state()
+			    && active_peers + new_peers < g_opt.n_peers)
+				++new_peers;
 		}
 
 		if (active_peers == g_opt.n_peers && !start_stats) {
