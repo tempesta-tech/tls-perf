@@ -382,36 +382,47 @@ private:
 	}
 
 	void
-	tcp_connect_try_finish(int ret = -1)
+	handle_established_tcp_conn()
 	{
-		if (ret == -1) {
-			socklen_t len = 4;
-			if (getsockopt(sd, SOL_SOCKET, SO_ERROR, &ret, &len))
-				throw Except("cannot get a socket connect()"
-					     " status");
-		}
+		dbg_status("has established TCP connection");
+		stat.tcp_handshakes--;
+		stat.tcp_connections++;
+		tls_handshake();
+	}
 
-		if (!ret) {
-			dbg_status("has established TCP connection");
-			// TCP connection established.
-			stat.tcp_handshakes--;
-			stat.tcp_connections++;
-			tls_handshake();
+	void
+	handle_connect_error(int err)
+	{
+		if (err == EINPROGRESS || err == EAGAIN) {
+			errno = 0;
+
+			// Continue to wait on the TCP handshake.
+			add_to_poll();
+
 			return;
 		}
 
-		// Some error on the socket.
-		state_ = STATE_TCP_CONNECTING;
-		if (errno != EINPROGRESS && errno != EAGAIN) {
-			if (!stat.tcp_connections)
-				throw Except("cannot establish even one"
-					     " TCP connection");
-			stat.tcp_handshakes--;
-			disconnect();
-			return;
-		}
-		// Continue to wait on TCP handshake.
-		add_to_poll();
+		if (!stat.tcp_connections)
+			throw Except("cannot establish even one TCP connection");
+
+		errno = 0;
+		stat.tcp_handshakes--;
+		disconnect();
+	}
+
+	void
+	tcp_connect_try_finish()
+	{
+		int ret = 0;
+		socklen_t len = 4;
+
+		if (getsockopt(sd, SOL_SOCKET, SO_ERROR, &ret, &len))
+			throw Except("cannot get a socket connect() status");
+
+		if (ret)
+			handle_connect_error(ret);
+		else
+			handle_established_tcp_conn();
 	}
 
 	void
@@ -425,10 +436,14 @@ private:
 		int r = connect(sd, (struct sockaddr *)&addr_, sizeof(addr_));
 
 		stat.tcp_handshakes++;
+		state_ = STATE_TCP_CONNECTING;
 
 		// On on localhost connect() can complete instantly
-		// even on non-blocking sockets.
-		tcp_connect_try_finish(r);
+		// even on non-blocking sockets (Tempesta FW case).
+		if (!r)
+			handle_established_tcp_conn();
+		else
+			handle_connect_error(errno);
 	}
 
 	void
@@ -473,7 +488,7 @@ usage()
 		<< " (default: " << DEFAULT_PEERS << ").\n"
 		<< "  -t <n>       Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
-		<< "  -T,--to      Duration of the test (in secodns)\n"
+		<< "  -T,--to      Duration of the test (in seconds)\n"
 		<< "  -c <cipher>  Force cipher choice (default: "
 		<< DEFAULT_CIPHER << ").\n"
 		<< "\n"

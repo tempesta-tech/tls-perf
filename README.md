@@ -1,4 +1,4 @@
-# TLS handshakes benchnarking tool
+# TLS handshakes benchmarking tool
 
 A tool to stress test the TLS handshake by triggering processor intensive
 cryptographic computations on the server side.
@@ -36,7 +36,7 @@ $ ./tls-perf --help
   -d,--debug   Run in debug mode.
   -l <n>       Limit parallel connections for each thread (default: 1).
   -t <n>       Number of threads (default: 1).
-  -T,--to      Duration of the test (in secodns)
+  -T,--to      Duration of the test (in seconds)
   -c <cipher>  Force cipher choice (default: ECDHE-ECDSA-AES128-GCM-SHA256).
 
 127.0.0.1:443 address is used by default.
