@@ -142,7 +142,7 @@ public:
 
 struct SocketHandler {
 	virtual ~SocketHandler() {};
-	virtual bool next_state() =0;
+	virtual void next_state() =0;
 
 	int sd;
 };
@@ -205,6 +205,15 @@ public:
 		reconnect_q_.push_back(sh);
 	}
 
+	// If we have something in the queue for the reconnection peers, then
+	// some peers have completed their handshakes and this means for the
+	// caller that we can do more connections.
+	bool
+	have_completed()
+	{
+		return !reconnect_q_.empty();
+	}
+
 	void
 	wait()
 	{
@@ -222,13 +231,17 @@ public:
 	{
 		if (ev_count_)
 			return (SocketHandler *)events_[--ev_count_].data.ptr;
+		return NULL;
+	}
 
+	SocketHandler *
+	next_backlog() noexcept
+	{
 		if (!reconnect_q_.empty()) {
 			SocketHandler *sh = reconnect_q_.front();
 			reconnect_q_.pop_front();
 			return sh;
 		}
-
 		return NULL;
 	}
 
@@ -262,23 +275,23 @@ private:
 
 private:
 	IO			&io_;
+	int			id_;
 	SSL			*tls_;
 	enum _states		state_;
 	struct sockaddr_in	addr_;
 	bool			polled_;
 
 public:
-	Peer(IO &io) noexcept
-		: io_(io), tls_(NULL)
+	Peer(IO &io, int id) noexcept
+		: io_(io), id_(id), tls_(NULL)
 		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
-		dbg << "create new peer" << std::endl;
-
 		sd = -1;
 		::memset(&addr_, 0, sizeof(addr_));
 		addr_.sin_family = AF_INET;
 		addr_.sin_port = g_opt.port;
 		addr_.sin_addr.s_addr = g_opt.ip;
+		dbg_status("created");
 	}
 
 	virtual ~Peer()
@@ -286,21 +299,22 @@ public:
 		disconnect();
 	}
 
-	bool
+	void
 	next_state() final override
 	{
 		switch (state_) {
 		case STATE_TCP_CONNECT:
-			return tcp_connect();
+			tcp_connect();
+			return;
 		case STATE_TCP_CONNECTING:
-			return tcp_connect_try_finish();
+			tcp_connect_try_finish();
+			return;
 		case STATE_TLS_HANDSHAKING:
 			tls_handshake();
-			break;
+			return;
 		default:
 			throw Except("bad next state %d", state_);
 		}
-		return false;
 	}
 
 private:
@@ -323,6 +337,13 @@ private:
 	}
 
 	void
+	dbg_status(const char *msg)
+	{
+		if (g_opt.debug)
+			dbg << "peer " << id_ << " " << msg << std::endl;
+	}
+
+	void
 	tls_handshake()
 	{
 		state_ = STATE_TLS_HANDSHAKING;
@@ -335,7 +356,7 @@ private:
 		int r = SSL_connect(tls_);
 
 		if (r == 1) {
-			// Handshake completed.
+			dbg_status("has completed TLS handshake");
 			stat.tls_handshakes--;
 			stat.tls_connections++;
 			disconnect();
@@ -360,7 +381,7 @@ private:
 		}
 	}
 
-	bool
+	void
 	tcp_connect_try_finish(int ret = -1)
 	{
 		if (ret == -1) {
@@ -371,11 +392,12 @@ private:
 		}
 
 		if (!ret) {
+			dbg_status("has established TCP connection");
 			// TCP connection established.
 			stat.tcp_handshakes--;
 			stat.tcp_connections++;
 			tls_handshake();
-			return true;
+			return;
 		}
 
 		// Some error on the socket.
@@ -386,14 +408,13 @@ private:
 					     " TCP connection");
 			stat.tcp_handshakes--;
 			disconnect();
-			return false;
+			return;
 		}
 		// Continue to wait on TCP handshake.
 		add_to_poll();
-		return false;
 	}
 
-	bool
+	void
 	tcp_connect()
 	{
 		if ((sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
@@ -407,7 +428,7 @@ private:
 
 		// On on localhost connect() can complete instantly
 		// even on non-blocking sockets.
-		return tcp_connect_try_finish(r);
+		tcp_connect_try_finish(r);
 	}
 
 	void
@@ -610,6 +631,12 @@ statistics_update() noexcept
 void
 statistics_dump() noexcept
 {
+	if (!start_stats) {
+		std::cerr << "ERROR: not enough statistics collected"
+			<< std::endl;
+		return;
+	}
+
 	// Do this only once at the end of program, so sorting isn't a big deal.
 	std::sort(stat.hs_history.begin(), stat.hs_history.end(),
 		  std::less<int32_t>());
@@ -633,36 +660,38 @@ io_loop()
 
 	while (!finish) {
 		// We implement slow start of number of concurrent TCP
-		// connections, so active_peers and peers dynamicly grow in
+		// connections, so active_peers and peers dynamically grow in
 		// this loop.
-		for ( ; new_peers; --new_peers) {
-			Peer *p = new Peer(io);
+		for ( ; active_peers < g_opt.n_peers && new_peers; --new_peers)
+		{
+			Peer *p = new Peer(io, active_peers++);
 			all_peers.push_back(p);
-			++active_peers;
 
-			if (p->next_state()) {
-				if (active_peers + new_peers < g_opt.n_peers) {
-					++new_peers;
-				} else {
-					new_peers = 0;
-					break;
-				}
-			}
-		}
-
-		io.wait();
-		while (auto p = io.next_sk()) {
-			if (!p->next_state())
+			p->next_state();
+			if (!io.have_completed())
 				continue;
 
-			if (active_peers < g_opt.n_peers) {
+			if (active_peers + new_peers < g_opt.n_peers) {
 				++new_peers;
 			}
 			else if (!start_stats) {
 				start_stats = true;
 				std::cout << "( All peers are active, start to"
-					<< " gather statistics )" << std::endl;
+					  << " gather statistics )"
+					  << std::endl;
 			}
+		}
+
+		io.wait();
+		while (auto p = io.next_sk())
+			p->next_state();
+
+		// Process disconnected sockets from the backlog.
+		while (!finish) {
+			auto p = io.next_backlog();
+			if (!p)
+				break;
+			p->next_state();
 		}
 	}
 
