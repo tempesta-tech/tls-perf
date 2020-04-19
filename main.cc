@@ -67,6 +67,12 @@ struct {
 	int32_t			min_hs;
 	int32_t			avg_hs;
 	std::vector<int32_t>	hs_history;
+
+	void
+	start_count()
+	{
+		stat_time = std::chrono::steady_clock::now();
+	}
 } stat __attribute__((aligned(L1DSZ))); // no split-locking
 
 struct {
@@ -689,12 +695,6 @@ io_loop()
 			if (active_peers + new_peers < g_opt.n_peers) {
 				++new_peers;
 			}
-			else if (!start_stats) {
-				start_stats = true;
-				std::cout << "( All peers are active, start to"
-					  << " gather statistics )"
-					  << std::endl;
-			}
 		}
 
 		io.wait();
@@ -707,6 +707,13 @@ io_loop()
 			if (!p)
 				break;
 			p->next_state();
+		}
+
+		if (active_peers == g_opt.n_peers && !start_stats) {
+			start_stats = true;
+			std::cout << "( All peers are active, start to"
+				  << " gather statistics )"
+				  << std::endl;
 		}
 	}
 
@@ -745,6 +752,7 @@ main(int argc, char *argv[])
 	}
 
 	auto start_t(steady_clock::now());
+	stat.start_count();
 	while (!finish) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		statistics_update();
