@@ -67,6 +67,12 @@ struct {
 	int32_t			min_hs;
 	int32_t			avg_hs;
 	std::vector<int32_t>	hs_history;
+
+	void
+	start_count()
+	{
+		stat_time = std::chrono::steady_clock::now();
+	}
 } stat __attribute__((aligned(L1DSZ))); // no split-locking
 
 struct {
@@ -82,7 +88,7 @@ struct {
 struct DbgStream {
 	template<typename T>
 	const DbgStream &
-	operator<<(const T &v) const
+	operator<<(const T &v) const noexcept
 	{
 		if (g_opt.debug)
 			std::cout << v;
@@ -90,7 +96,7 @@ struct DbgStream {
 	}
 
 	const DbgStream &
-	operator<<(std::ostream &(*manip)(std::ostream &)) const
+	operator<<(std::ostream &(*manip)(std::ostream &)) const noexcept
 	{
 		if (g_opt.debug)
 			manip(std::cout);
@@ -222,14 +228,24 @@ public:
 	{
 		if (ev_count_)
 			return (SocketHandler *)events_[--ev_count_].data.ptr;
-
-		if (!reconnect_q_.empty()) {
-			SocketHandler *sh = reconnect_q_.front();
-			reconnect_q_.pop_front();
-			return sh;
-		}
-
 		return NULL;
+	}
+
+	void
+	backlog() noexcept
+	{
+		backlog_.swap(reconnect_q_);
+	}
+
+	SocketHandler *
+	next_backlog() noexcept
+	{
+		if (backlog_.empty())
+			return NULL;
+
+		SocketHandler *sh = backlog_.front();
+		backlog_.pop_front();
+		return sh;
 	}
 
 	SSL *
@@ -250,6 +266,7 @@ private:
 	SSL_CTX			*tls_;
 	struct epoll_event	events_[N_EVENTS];
 	std::list<SocketHandler *> reconnect_q_;
+	std::list<SocketHandler *> backlog_;
 };
 
 class Peer : public SocketHandler {
@@ -262,23 +279,23 @@ private:
 
 private:
 	IO			&io_;
+	int			id_;
 	SSL			*tls_;
 	enum _states		state_;
 	struct sockaddr_in	addr_;
 	bool			polled_;
 
 public:
-	Peer(IO &io) noexcept
-		: io_(io), tls_(NULL)
+	Peer(IO &io, int id) noexcept
+		: io_(io), id_(id), tls_(NULL)
 		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
-		dbg << "create new peer" << std::endl;
-
 		sd = -1;
 		::memset(&addr_, 0, sizeof(addr_));
 		addr_.sin_family = AF_INET;
 		addr_.sin_port = g_opt.port;
 		addr_.sin_addr.s_addr = g_opt.ip;
+		dbg_status("created");
 	}
 
 	virtual ~Peer()
@@ -295,8 +312,7 @@ public:
 		case STATE_TCP_CONNECTING:
 			return tcp_connect_try_finish();
 		case STATE_TLS_HANDSHAKING:
-			tls_handshake();
-			break;
+			return tls_handshake();
 		default:
 			throw Except("bad next state %d", state_);
 		}
@@ -323,6 +339,13 @@ private:
 	}
 
 	void
+	dbg_status(const char *msg) noexcept
+	{
+		if (g_opt.debug)
+			dbg << "peer " << id_ << " " << msg << std::endl;
+	}
+
+	bool
 	tls_handshake()
 	{
 		state_ = STATE_TLS_HANDSHAKING;
@@ -335,13 +358,13 @@ private:
 		int r = SSL_connect(tls_);
 
 		if (r == 1) {
-			// Handshake completed.
+			dbg_status("has completed TLS handshake");
 			stat.tls_handshakes--;
 			stat.tls_connections++;
 			disconnect();
 			stat.tcp_connections--;
 			io_.queue_reconnect(this);
-			return;
+			return true;
 		}
 
 		switch (SSL_get_error(tls_, r)) {
@@ -358,38 +381,51 @@ private:
 			disconnect();
 			stat.tcp_connections--;
 		}
+		return false;
 	}
 
 	bool
-	tcp_connect_try_finish(int ret = -1)
+	handle_established_tcp_conn()
 	{
-		if (ret == -1) {
-			socklen_t len = 4;
-			if (getsockopt(sd, SOL_SOCKET, SO_ERROR, &ret, &len))
-				throw Except("cannot get a socket connect()"
-					     " status");
+		dbg_status("has established TCP connection");
+		stat.tcp_handshakes--;
+		stat.tcp_connections++;
+		return tls_handshake();
+	}
+
+	void
+	handle_connect_error(int err)
+	{
+		if (err == EINPROGRESS || err == EAGAIN) {
+			errno = 0;
+
+			// Continue to wait on the TCP handshake.
+			add_to_poll();
+
+			return;
 		}
 
-		if (!ret) {
-			// TCP connection established.
-			stat.tcp_handshakes--;
-			stat.tcp_connections++;
-			tls_handshake();
-			return true;
-		}
+		if (!stat.tcp_connections)
+			throw Except("cannot establish even one TCP connection");
 
-		// Some error on the socket.
-		state_ = STATE_TCP_CONNECTING;
-		if (errno != EINPROGRESS && errno != EAGAIN) {
-			if (!stat.tcp_connections)
-				throw Except("cannot establish even one"
-					     " TCP connection");
-			stat.tcp_handshakes--;
-			disconnect();
-			return false;
-		}
-		// Continue to wait on TCP handshake.
-		add_to_poll();
+		errno = 0;
+		stat.tcp_handshakes--;
+		disconnect();
+	}
+
+	bool
+	tcp_connect_try_finish()
+	{
+		int ret = 0;
+		socklen_t len = 4;
+
+		if (getsockopt(sd, SOL_SOCKET, SO_ERROR, &ret, &len))
+			throw Except("cannot get a socket connect() status");
+
+		if (!ret)
+			return handle_established_tcp_conn();
+
+		handle_connect_error(ret);
 		return false;
 	}
 
@@ -404,10 +440,15 @@ private:
 		int r = connect(sd, (struct sockaddr *)&addr_, sizeof(addr_));
 
 		stat.tcp_handshakes++;
+		state_ = STATE_TCP_CONNECTING;
 
 		// On on localhost connect() can complete instantly
-		// even on non-blocking sockets.
-		return tcp_connect_try_finish(r);
+		// even on non-blocking sockets (e.g. Tempesta FW case).
+		if (!r)
+			return handle_established_tcp_conn();
+
+		handle_connect_error(errno);
+		return false;
 	}
 
 	void
@@ -442,7 +483,7 @@ private:
 };
 
 void
-usage()
+usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
@@ -452,7 +493,7 @@ usage()
 		<< " (default: " << DEFAULT_PEERS << ").\n"
 		<< "  -t <n>       Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
-		<< "  -T,--to      Duration of the test (in secodns)\n"
+		<< "  -T,--to      Duration of the test (in seconds)\n"
 		<< "  -c <cipher>  Force cipher choice (default: "
 		<< DEFAULT_CIPHER << ").\n"
 		<< "\n"
@@ -465,7 +506,7 @@ usage()
 }
 
 static void
-do_getopt(int argc, char *argv[])
+do_getopt(int argc, char *argv[]) noexcept
 {
 	int c, i, o = 0;
 
@@ -535,13 +576,13 @@ do_getopt(int argc, char *argv[])
 std::atomic<bool> finish(false), start_stats(false);
 
 void
-sig_handler(int signum)
+sig_handler(int signum) noexcept
 {
 	finish = true;
 }
 
 void
-update_limits()
+update_limits() noexcept
 {
 	struct rlimit open_file_limit = {};
 	// Set limit for all the peer sockets + epoll socket for
@@ -610,10 +651,17 @@ statistics_update() noexcept
 void
 statistics_dump() noexcept
 {
+	auto hsz = stat.hs_history.size();
+
+	if (!start_stats || hsz < 1) {
+		std::cerr << "ERROR: not enough statistics collected"
+			<< std::endl;
+		return;
+	}
+
 	// Do this only once at the end of program, so sorting isn't a big deal.
 	std::sort(stat.hs_history.begin(), stat.hs_history.end(),
 		  std::less<int32_t>());
-	auto hsz = stat.hs_history.size();
 
 	std::cout << "MEASURES (seconds) " << stat.measures
 		<< "; MAX h/s " << stat.max_hs
@@ -633,36 +681,41 @@ io_loop()
 
 	while (!finish) {
 		// We implement slow start of number of concurrent TCP
-		// connections, so active_peers and peers dynamicly grow in
+		// connections, so active_peers and peers dynamically grow in
 		// this loop.
-		for ( ; new_peers; --new_peers) {
-			Peer *p = new Peer(io);
+		for ( ; active_peers < g_opt.n_peers && new_peers; --new_peers)
+		{
+			Peer *p = new Peer(io, active_peers++);
 			all_peers.push_back(p);
-			++active_peers;
 
-			if (p->next_state()) {
-				if (active_peers + new_peers < g_opt.n_peers) {
-					++new_peers;
-				} else {
-					new_peers = 0;
-					break;
-				}
-			}
+			if (p->next_state()
+			    && active_peers + new_peers < g_opt.n_peers)
+				++new_peers;
 		}
 
 		io.wait();
 		while (auto p = io.next_sk()) {
-			if (!p->next_state())
-				continue;
-
-			if (active_peers < g_opt.n_peers) {
+			if (p->next_state()
+			    && active_peers + new_peers < g_opt.n_peers)
 				++new_peers;
-			}
-			else if (!start_stats) {
-				start_stats = true;
-				std::cout << "( All peers are active, start to"
-					<< " gather statistics )" << std::endl;
-			}
+		}
+
+		// Process disconnected sockets from the backlog.
+		io.backlog();
+		while (!finish) {
+			auto p = io.next_backlog();
+			if (!p)
+				break;
+			if (p->next_state()
+			    && active_peers + new_peers < g_opt.n_peers)
+				++new_peers;
+		}
+
+		if (active_peers == g_opt.n_peers && !start_stats) {
+			start_stats = true;
+			std::cout << "( All peers are active, start to"
+				  << " gather statistics )"
+				  << std::endl;
 		}
 	}
 
@@ -701,6 +754,7 @@ main(int argc, char *argv[])
 	}
 
 	auto start_t(steady_clock::now());
+	stat.start_count();
 	while (!finish) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		statistics_update();
