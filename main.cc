@@ -443,7 +443,7 @@ private:
 		state_ = STATE_TCP_CONNECTING;
 
 		// On on localhost connect() can complete instantly
-		// even on non-blocking sockets (Tempesta FW case).
+		// even on non-blocking sockets (e.g. Tempesta FW case).
 		if (!r)
 			return handle_established_tcp_conn();
 
