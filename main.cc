@@ -32,11 +32,13 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <csignal>
 #include <chrono>
 #include <iostream>
 #include <list>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -48,32 +50,8 @@
 static const int DEFAULT_THREADS = 1;
 static const int DEFAULT_PEERS = 1;
 static const int PEERS_SLOW_START = 10;
+static const int LATENCY_N = 1024;
 static const char *DEFAULT_CIPHER = "ECDHE-ECDSA-AES128-GCM-SHA256";
-
-struct {
-	typedef std::chrono::time_point<std::chrono::steady_clock> __time_t;
-
-	std::atomic<int32_t>	tcp_handshakes;
-	std::atomic<int32_t>	tcp_connections;
-	std::atomic<int32_t>	tls_connections;
-	std::atomic<int32_t>	tls_handshakes;
-	std::atomic<int32_t>	error_count;
-	int32_t			__no_false_sharing[11];
-
-	__time_t		stat_time;
-
-	int32_t			measures;
-	int32_t			max_hs;
-	int32_t			min_hs;
-	int32_t			avg_hs;
-	std::vector<int32_t>	hs_history;
-
-	void
-	start_count()
-	{
-		stat_time = std::chrono::steady_clock::now();
-	}
-} stat __attribute__((aligned(L1DSZ))); // no split-locking
 
 struct {
 	int		n_peers;
@@ -103,6 +81,82 @@ struct DbgStream {
 		return *this;
 	}
 } dbg;
+
+struct {
+	typedef std::chrono::time_point<std::chrono::steady_clock> __time_t;
+
+	std::atomic<int32_t>	tcp_handshakes;
+	std::atomic<int32_t>	tcp_connections;
+	std::atomic<int32_t>	tls_connections;
+	std::atomic<int32_t>	tls_handshakes;
+	std::atomic<int32_t>	error_count;
+	int32_t			__no_false_sharing[11];
+
+	__time_t		stat_time;
+
+	int32_t			measures;
+	int32_t			max_hs;
+	int32_t			min_hs;
+	int32_t			avg_hs;
+	std::vector<int32_t>	hs_history;
+
+	void
+	start_count()
+	{
+		stat_time = std::chrono::steady_clock::now();
+	}
+} stat __attribute__((aligned(L1DSZ))); // no split-locking
+
+static struct {
+	std::mutex			lock;
+	std::vector<unsigned long>	stat;
+	unsigned long			acc_lat;
+} g_lat_stat;
+
+class LatencyStat {
+public:
+	LatencyStat() noexcept
+		: i_(0), di_(1), stat_({0})
+	{}
+
+	void
+	update(unsigned long dt) noexcept
+	{
+		if (!dt) {
+			dbg << "Bad zero latency" << std::endl;
+			return;
+		}
+		stat_[i_] = dt;
+
+		i_ += di_;
+		// Write statistics in ring buffer fashion, but mix later
+		// results with earlier instead of just rewriting them.
+		if (i_ >= LATENCY_N) {
+			i_ = 0;
+			if (++di_ > LATENCY_N / 4)
+				di_ = 1;
+		}
+	}
+
+	void
+	dump() noexcept
+	{
+		std::lock_guard<std::mutex> _(g_lat_stat.lock);
+		for (auto l : stat_) {
+			if (!l)
+				break;
+			g_lat_stat.stat.push_back(l);
+			g_lat_stat.acc_lat += l;
+		}
+	}
+
+private:
+	unsigned int				i_;
+	unsigned int				di_;
+	std::array<unsigned long, LATENCY_N>	stat_;
+};
+
+static thread_local LatencyStat lat_stat __attribute__((aligned(L1DSZ)));
 
 class Except : public std::exception {
 private:
@@ -348,6 +402,8 @@ private:
 	bool
 	tls_handshake()
 	{
+		using namespace std::chrono;
+
 		state_ = STATE_TLS_HANDSHAKING;
 
 		if (!tls_) {
@@ -355,9 +411,17 @@ private:
 			stat.tls_handshakes++;
 		}
 
+		auto t0(steady_clock::now());
+
 		int r = SSL_connect(tls_);
 
 		if (r == 1) {
+			// Update TLS handshake latency only if a handshakes
+			// happens immediately.
+			auto t1(steady_clock::now());
+			auto lat = duration_cast<microseconds>(t1 - t0).count();
+			lat_stat.update(lat);
+
 			dbg_status("has completed TLS handshake");
 			stat.tls_handshakes--;
 			stat.tls_connections++;
@@ -652,6 +716,7 @@ void
 statistics_dump() noexcept
 {
 	auto hsz = stat.hs_history.size();
+	auto lsz = g_lat_stat.stat.size();
 
 	if (!start_stats || hsz < 1) {
 		std::cerr << "ERROR: not enough statistics collected"
@@ -661,14 +726,23 @@ statistics_dump() noexcept
 
 	// Do this only once at the end of program, so sorting isn't a big deal.
 	std::sort(stat.hs_history.begin(), stat.hs_history.end(),
+		  std::greater<int32_t>());
+	std::sort(g_lat_stat.stat.begin(), g_lat_stat.stat.end(),
 		  std::less<int32_t>());
 
-	std::cout << "MEASURES (seconds) " << stat.measures
-		<< "; MAX h/s " << stat.max_hs
-		<< "; 99P h/s " << stat.hs_history[hsz * 99 / 100]
-		<< "; 95P h/s " << stat.hs_history[hsz * 95 / 100]
+	std::cout << "MEASURES (seconds) " << stat.measures << ":\t"
+		<< " MAX h/s " << stat.max_hs
 		<< "; AVG h/s " << stat.avg_hs
+		// 95% handshakes are faster than this number.
+		<< "; 95P h/s " << stat.hs_history[hsz * 95 / 100]
 		<< "; MIN h/s " << stat.min_hs << std::endl;
+
+	std::cout << "LATENCY (microseconds):\t"
+		<< " MIN " << g_lat_stat.stat.front()
+		<< "; AVG " << g_lat_stat.acc_lat / lsz
+		// 95% latencies are smaller than this one.
+		<< "; 95P " << g_lat_stat.stat[lsz * 95 / 100]
+		<< "; MAX " << g_lat_stat.stat.back() << std::endl;
 }
 
 void
@@ -718,6 +792,8 @@ io_loop()
 				  << std::endl;
 		}
 	}
+
+	lat_stat.dump();
 
 	for (auto p : all_peers)
 		delete p;
