@@ -679,8 +679,6 @@ statistics_update() noexcept
 {
 	using namespace std::chrono;
 
-	stat.measures++;
-
 	auto tls_conns = stat.tls_connections.load();
 
 	auto now(steady_clock::now());
@@ -699,6 +697,7 @@ statistics_update() noexcept
 	if (!start_stats)
 		return;
 
+	stat.measures++;
 	if (stat.max_hs < curr_hs)
 		stat.max_hs = curr_hs;
 	if (curr_hs && (stat.min_hs > curr_hs || !stat.min_hs))

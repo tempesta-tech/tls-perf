@@ -46,24 +46,38 @@ $ nmap --script ssl-enum-ciphers -p <PORT> <IP>
 ```
 
 ## Run
+
+**tls-perf** starts to establish new connections slowly and prints
 ```
-$ ./tls-perf -l 100 -t 2 -T 10 192.168.100.4 9443
-Use cipher 'ECDHE-ECDSA-AES128-GCM-SHA256'
 ( All peers are active, start to gather statistics )
-TLS hs in progress 98 [1748 h/s], TCP open conns 98 [102 hs in progress], Errors 0
-TLS hs in progress 186 [2399 h/s], TCP open conns 186 [13 hs in progress], Errors 0
-TLS hs in progress 129 [2666 h/s], TCP open conns 129 [71 hs in progress], Errors 0
-TLS hs in progress 173 [2379 h/s], TCP open conns 173 [13 hs in progress], Errors 0
-TLS hs in progress 190 [1990 h/s], TCP open conns 191 [5 hs in progress], Errors 0
-TLS hs in progress 196 [2407 h/s], TCP open conns 196 [4 hs in progress], Errors 0
-TLS hs in progress 163 [2568 h/s], TCP open conns 163 [37 hs in progress], Errors 0
-TLS hs in progress 158 [2606 h/s], TCP open conns 158 [16 hs in progress], Errors 0
-TLS hs in progress 179 [2287 h/s], TCP open conns 179 [13 hs in progress], Errors 0
-TLS hs in progress 185 [2168 h/s], TCP open conns 185 [14 hs in progress], Errors 0
-MEASURES (seconds) 10:	 MAX h/s 2666; AVG h/s 2319; 95P h/s 1748; MIN h/s 1748
-LATENCY (microseconds):	 MIN 18; AVG 39; 95P 55; MAX 275
+```
+This time all the requested peers managing all the requested connections are
+active and **tls-perf** starts to gather statistics for the final report. Thus,
+you might seem smaller number for `MEASURES` than you saw per-second statistic
+lines.
+
+The slow start also warms up all the caches of the benchmarked system, so
+you don't need to make additional load before the benchmark.
+
+
+```
+$ ./tls-perf -l 100 -t 2 -T 10 192.168.100.4 443
+Use cipher 'ECDHE-ECDSA-AES128-GCM-SHA256'
+TLS hs in progress 313 [647 h/s], TCP open conns 313 [354 hs in progress], Errors 0
+TLS hs in progress 644 [537 h/s], TCP open conns 644 [540 hs in progress], Errors 0
+TLS hs in progress 801 [580 h/s], TCP open conns 802 [980 hs in progress], Errors 0
+( All peers are active, start to gather statistics )
+TLS hs in progress 1134 [596 h/s], TCP open conns 1134 [866 hs in progress], Errors 0
+TLS hs in progress 1093 [614 h/s], TCP open conns 1093 [907 hs in progress], Errors 0
+TLS hs in progress 1045 [807 h/s], TCP open conns 1045 [953 hs in progress], Errors 0
+TLS hs in progress 1225 [666 h/s], TCP open conns 1225 [775 hs in progress], Errors 0
+TLS hs in progress 1175 [854 h/s], TCP open conns 1175 [825 hs in progress], Errors 0
+TLS hs in progress 1103 [790 h/s], TCP open conns 1103 [897 hs in progress], Errors 0
+TLS hs in progress 1079 [689 h/s], TCP open conns 1079 [916 hs in progress], Errors 0
+MEASURES (seconds) 7:	 MAX h/s 854; AVG h/s 715; 95P h/s 596; MIN h/s 596
+LATENCY (microseconds):	 MIN 33; AVG 72; 95P 104; MAX 3334
 ```
 
-`95P` parameters in resulting statistics show 95'th percentilie: 95% of TLS
+`95P` parameters in resulting statistics show 95'th percentile: 95% of TLS
 handshakes per second measurements are better than the number and 95% of TLS
-handshakes require less microsendos than the number.
+handshakes require less microseconds than the number.
