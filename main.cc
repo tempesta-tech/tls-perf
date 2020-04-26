@@ -792,8 +792,6 @@ io_loop()
 		}
 	}
 
-	lat_stat.dump();
-
 	for (auto p : all_peers)
 		delete p;
 }
@@ -825,6 +823,8 @@ main(int argc, char *argv[])
 				std::cerr << "ERROR: " << e.what() << std::endl;
 				exit(1);
 			}
+
+			lat_stat.dump();
 		});
 	}
 
