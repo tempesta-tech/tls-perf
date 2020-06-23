@@ -56,6 +56,7 @@ static const char *DEFAULT_CIPHER = "ECDHE-ECDSA-AES128-GCM-SHA256";
 struct {
 	int		n_peers;
 	int		n_threads;
+	size_t		n_hs;
 	int		timeout;
 	uint32_t	ip;
 	uint16_t	port;
@@ -85,12 +86,13 @@ struct DbgStream {
 struct {
 	typedef std::chrono::time_point<std::chrono::steady_clock> __time_t;
 
+	std::atomic<uint64_t>	tot_tls_handshakes;
 	std::atomic<int32_t>	tcp_handshakes;
 	std::atomic<int32_t>	tcp_connections;
 	std::atomic<int32_t>	tls_connections;
 	std::atomic<int32_t>	tls_handshakes;
 	std::atomic<int32_t>	error_count;
-	int32_t			__no_false_sharing[11];
+	int32_t			__no_false_sharing[9];
 
 	__time_t		stat_time;
 
@@ -425,6 +427,7 @@ private:
 			dbg_status("has completed TLS handshake");
 			stat.tls_handshakes--;
 			stat.tls_connections++;
+			stat.tot_tls_handshakes++;
 			disconnect();
 			stat.tcp_connections--;
 			io_.queue_reconnect(this);
@@ -551,15 +554,16 @@ usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
-		<< "  -h,--help    Print this help and exit.\n"
-		<< "  -d,--debug   Run in debug mode.\n"
-		<< "  -l <n>       Limit parallel connections for each thread"
-		<< " (default: " << DEFAULT_PEERS << ").\n"
-		<< "  -t <n>       Number of threads"
+		<< "  -h,--help    Print this help and exit\n"
+		<< "  -d,--debug   Run in debug mode\n"
+		<< "  -l <N>       Limit parallel connections for each thread"
+		<< " (default: " << DEFAULT_PEERS << ")\n"
+		<< "  -n <N>       Total number of handshakes to establish\n"
+		<< "  -t <N>       Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
 		<< "  -T,--to      Duration of the test (in seconds)\n"
 		<< "  -c <cipher>  Force cipher choice (default: "
-		<< DEFAULT_CIPHER << ").\n"
+		<< DEFAULT_CIPHER << ")\n"
 		<< "\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
@@ -576,6 +580,7 @@ do_getopt(int argc, char *argv[]) noexcept
 
 	g_opt.n_peers = DEFAULT_PEERS;
 	g_opt.n_threads = DEFAULT_THREADS;
+	g_opt.n_hs = ULONG_MAX; // inifinite, in practice
 	g_opt.port = htons(443);
 	g_opt.ip = inet_addr("127.0.0.1");
 	g_opt.cipher = DEFAULT_CIPHER;
@@ -589,7 +594,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		{0, 0, 0, 0}
 	};
 
-	while ((c = getopt_long(argc, argv, "hl:c:dt:T:", long_opts, &o)) != -1)
+	while ((c = getopt_long(argc, argv, "hl:c:dt:n:T:", long_opts, &o)) != -1)
 	{
 		switch (c) {
 		case 0:
@@ -610,6 +615,9 @@ do_getopt(int argc, char *argv[]) noexcept
 					<< std::endl;
 				exit(2);
 			}
+			break;
+		case 'n':
+			g_opt.n_hs = atoi(optarg);
 			break;
 		case 'T':
 			g_opt.timeout = atoi(optarg);
@@ -729,19 +737,30 @@ statistics_dump() noexcept
 	std::sort(g_lat_stat.stat.begin(), g_lat_stat.stat.end(),
 		  std::less<int32_t>());
 
-	std::cout << "MEASURES (seconds) " << stat.measures << ":\t"
+	std::cout << "========================================" << std::endl;
+	std::cout << " TOTAL:                  SECONDS " << stat.measures
+		<< "; HANDSHAKES " << stat.tot_tls_handshakes << std::endl; 
+	std::cout << " MEASURES (seconds):    "
 		<< " MAX h/s " << stat.max_hs
 		<< "; AVG h/s " << stat.avg_hs
 		// 95% handshakes are faster than this number.
 		<< "; 95P h/s " << stat.hs_history[hsz * 95 / 100]
 		<< "; MIN h/s " << stat.min_hs << std::endl;
 
-	std::cout << "LATENCY (microseconds):\t"
+	std::cout << " LATENCY (microseconds):"
 		<< " MIN " << g_lat_stat.stat.front()
 		<< "; AVG " << g_lat_stat.acc_lat / lsz
 		// 95% latencies are smaller than this one.
 		<< "; 95P " << g_lat_stat.stat[lsz * 95 / 100]
 		<< "; MAX " << g_lat_stat.stat.back() << std::endl;
+}
+
+bool
+end_of_work() noexcept
+{
+	// We can make bit more handshakes than was specified by a user -
+	// not a big deal.
+	return finish || stat.tot_tls_handshakes >= g_opt.n_hs;
 }
 
 void
@@ -752,7 +771,7 @@ io_loop()
 	IO io;
 	std::list<SocketHandler *> all_peers;
 
-	while (!finish) {
+	while (!end_of_work()) {
 		// We implement slow start of number of concurrent TCP
 		// connections, so active_peers and peers dynamically grow in
 		// this loop.
@@ -830,7 +849,7 @@ main(int argc, char *argv[])
 
 	auto start_t(steady_clock::now());
 	stat.start_count();
-	while (!finish) {
+	while (!end_of_work()) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		statistics_update();
 

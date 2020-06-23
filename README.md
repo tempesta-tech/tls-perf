@@ -32,12 +32,13 @@ g++ -o tls-perf main.o -lpthread -lssl -lcrypto
 $ ./tls-perf --help
 
 ./tls-perf [options] <ip> <port>
-  -h,--help    Print this help and exit.
-  -d,--debug   Run in debug mode.
-  -l <n>       Limit parallel connections for each thread (default: 1).
-  -t <n>       Number of threads (default: 1).
+  -h,--help    Print this help and exit
+  -d,--debug   Run in debug mode
+  -l <N>       Limit parallel connections for each thread (default: 1)
+  -n <N>       Total number of handshakes to establish
+  -t <N>       Number of threads (default: 1).
   -T,--to      Duration of the test (in seconds)
-  -c <cipher>  Force cipher choice (default: ECDHE-ECDSA-AES128-GCM-SHA256).
+  -c <cipher>  Force cipher choice (default: ECDHE-ECDSA-AES128-GCM-SHA256)
 
 127.0.0.1:443 address is used by default.
 
@@ -59,25 +60,28 @@ lines.
 The slow start also warms up all the caches of the benchmarked system, so
 you don't need to make additional load before the benchmark.
 
-
 ```
-$ ./tls-perf -l 100 -t 2 -T 10 192.168.100.4 443
+$ ./tls-perf -l 1000 -t 2 -T 10 192.168.100.4 443
+set open files limit to 2008
 Use cipher 'ECDHE-ECDSA-AES128-GCM-SHA256'
-TLS hs in progress 313 [647 h/s], TCP open conns 313 [354 hs in progress], Errors 0
-TLS hs in progress 644 [537 h/s], TCP open conns 644 [540 hs in progress], Errors 0
-TLS hs in progress 801 [580 h/s], TCP open conns 802 [980 hs in progress], Errors 0
+TLS hs in progress 252 [382 h/s], TCP open conns 252 [146 hs in progress], Errors 0
+TLS hs in progress 400 [495 h/s], TCP open conns 400 [497 hs in progress], Errors 0
+TLS hs in progress 549 [620 h/s], TCP open conns 549 [932 hs in progress], Errors 0
 ( All peers are active, start to gather statistics )
-TLS hs in progress 1134 [596 h/s], TCP open conns 1134 [866 hs in progress], Errors 0
-TLS hs in progress 1093 [614 h/s], TCP open conns 1093 [907 hs in progress], Errors 0
-TLS hs in progress 1045 [807 h/s], TCP open conns 1045 [953 hs in progress], Errors 0
-TLS hs in progress 1225 [666 h/s], TCP open conns 1225 [775 hs in progress], Errors 0
-TLS hs in progress 1175 [854 h/s], TCP open conns 1175 [825 hs in progress], Errors 0
-TLS hs in progress 1103 [790 h/s], TCP open conns 1103 [897 hs in progress], Errors 0
-TLS hs in progress 1079 [689 h/s], TCP open conns 1079 [916 hs in progress], Errors 0
-MEASURES (seconds) 7:	 MAX h/s 854; AVG h/s 715; 95P h/s 596; MIN h/s 596
-LATENCY (microseconds):	 MIN 33; AVG 72; 95P 104; MAX 3334
+TLS hs in progress 834 [448 h/s], TCP open conns 834 [1071 hs in progress], Errors 0
+TLS hs in progress 945 [548 h/s], TCP open conns 945 [1055 hs in progress], Errors 0
+TLS hs in progress 908 [529 h/s], TCP open conns 908 [1092 hs in progress], Errors 0
+TLS hs in progress 946 [603 h/s], TCP open conns 946 [1047 hs in progress], Errors 0
+TLS hs in progress 969 [615 h/s], TCP open conns 969 [1031 hs in progress], Errors 0
+TLS hs in progress 994 [618 h/s], TCP open conns 994 [1006 hs in progress], Errors 0
+TLS hs in progress 941 [585 h/s], TCP open conns 941 [1059 hs in progress], Errors 0
+========================================
+ TOTAL:                  SECONDS 7; HANDSHAKES 5443
+ MEASURES (seconds):     MAX h/s 618; AVG h/s 561; 95P h/s 448; MIN h/s 448
+ LATENCY (microseconds): MIN 26; AVG 50; 95P 74; MAX 3945
 ```
 
 `95P` parameters in resulting statistics show 95'th percentile: 95% of TLS
 handshakes per second measurements are better than the number and 95% of TLS
 handshakes require less microseconds than the number.
+
