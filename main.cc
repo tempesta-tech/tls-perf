@@ -56,16 +56,16 @@ static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
 static const char *DEFAULT_CIPHER_13 = "TLS_AES_256_GCM_SHA384";
 
 struct {
-	int		n_peers;
-	int		n_threads;
-	size_t		n_hs;
-	int		timeout;
-	uint32_t	ip;
-	uint16_t	port;
-	bool		debug;
-	int		tls_vers;
-	int		use_tickets;
-	const char	*cipher;
+	int			n_peers;
+	int			n_threads;
+	size_t			n_hs;
+	int			timeout;
+	uint16_t		port;
+	bool			debug;
+	int			tls_vers;
+	int			use_tickets;
+	const char		*cipher;
+	struct sockaddr_in	ip;
 } g_opt;
 
 struct DbgStream {
@@ -363,9 +363,7 @@ public:
 	{
 		sd = -1;
 		::memset(&addr_, 0, sizeof(addr_));
-		addr_.sin_family = AF_INET;
-		addr_.sin_port = g_opt.port;
-		addr_.sin_addr.s_addr = g_opt.ip;
+		memcpy(&addr_, &g_opt.ip, sizeof(addr_));
 		dbg_status("created");
 	}
 
@@ -514,7 +512,8 @@ private:
 	bool
 	tcp_connect()
 	{
-		if ((sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
+		sd = socket(addr_.sin_family, SOCK_STREAM, IPPROTO_TCP);
+		if (sd < 0)
 			throw Except("cannot create a socket");
 
 		fcntl(sd, F_SETFL, fcntl(sd, F_GETFL, 0) | O_NONBLOCK);
@@ -605,13 +604,14 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.n_peers = DEFAULT_PEERS;
 	g_opt.n_threads = DEFAULT_THREADS;
 	g_opt.n_hs = ULONG_MAX; // inifinite, in practice
-	g_opt.port = htons(443);
-	g_opt.ip = inet_addr("127.0.0.1");
 	g_opt.cipher = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
 	g_opt.use_tickets = false;
+	c = inet_pton(AF_INET, "127.0.0.1", &g_opt.ip.sin_addr);
+	g_opt.ip.sin_family = AF_INET;
+	g_opt.ip.sin_port = htons(443);
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
@@ -686,17 +686,27 @@ do_getopt(int argc, char *argv[]) noexcept
 	}
 	if (optind >= argc)
 		return;
-	g_opt.ip = inet_addr(argv[optind++]);
-	g_opt.port = htons(atoi(argv[optind]));
+	if (inet_pton(AF_INET, argv[optind], &g_opt.ip.sin_addr) == 1)
+		g_opt.ip.sin_family = AF_INET;
+	else if (inet_pton(AF_INET6, argv[optind], &g_opt.ip.sin_addr) == 1)
+		g_opt.ip.sin_family = AF_INET6;
+	else
+	{
+		std::cerr << "ERROR: can't parse ip address from string '"
+			  << argv[optind] << std::endl;
+	}
+	g_opt.ip.sin_port = htons(atoi(argv[++optind]));
 }
 
 void
 print_settings()
 {
-	in_addr addr = {g_opt.ip};
+	char str[INET6_ADDRSTRLEN] = {};
+
+	inet_ntop(g_opt.ip.sin_family, &g_opt.ip.sin_addr, str, INET6_ADDRSTRLEN);
 	std::cout << "Running TLS benchmark with following settings:\n"
-		  << "Host:        " << inet_ntoa(addr) << ":"
-		  << ntohs(g_opt.port) << "\n"
+		  << "Host:        " << str << " : "
+		  << ntohs(g_opt.ip.sin_port) <<  "\n"
 		  << "TLS version: ";
 	if (g_opt.tls_vers == TLS1_2_VERSION)
 		std::cout << "1.2\n";
