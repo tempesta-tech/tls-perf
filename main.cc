@@ -582,7 +582,7 @@ usage() noexcept
 		<< "for TLSv1.3: " << DEFAULT_CIPHER_13 << "),\n"
 		<< "                                                 "
 		<< "or type 'any' to disable ciphersuite restrictions \n"
-		<< "  -tls_13 version>  Set TLS version for handshake: "
+		<< "  --tls <version>   Set TLS version for handshake: "
 		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
 		<< "  --use-tickets     Enable TLS Session tickets, (default: "
 		<< "disabled)\n"
@@ -603,13 +603,13 @@ do_getopt(int argc, char *argv[]) noexcept
 
 	g_opt.n_peers = DEFAULT_PEERS;
 	g_opt.n_threads = DEFAULT_THREADS;
-	g_opt.n_hs = ULONG_MAX; // inifinite, in practice
+	g_opt.n_hs = ULONG_MAX; // infinite, in practice
 	g_opt.cipher = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
 	g_opt.use_tickets = false;
-	c = inet_pton(AF_INET, "127.0.0.1", &g_opt.ip.sin_addr);
+	inet_pton(AF_INET, "127.0.0.1", &g_opt.ip.sin_addr);
 	g_opt.ip.sin_family = AF_INET;
 	g_opt.ip.sin_port = htons(443);
 
@@ -653,11 +653,11 @@ do_getopt(int argc, char *argv[]) noexcept
 			g_opt.timeout = atoi(optarg);
 			break;
 		case 'V':
-			if (!strcmp(optarg, "1.2")) {
+			if (!strncmp(optarg, "1.2", 4)) {
 				g_opt.tls_vers = TLS1_2_VERSION;
-			} else if (!strcmp(optarg, "1.3")) {
+			} else if (!strncmp(optarg, "1.3", 4)) {
 				g_opt.tls_vers = TLS1_3_VERSION;
-			} else if (!strcmp(optarg, "any")) {
+			} else if (!strncmp(optarg, "any", 4)) {
 				g_opt.tls_vers = TLS_ANY_VERSION;
 			}else {
 				std::cout << "Unknown TLS version, fallback to"
@@ -694,6 +694,7 @@ do_getopt(int argc, char *argv[]) noexcept
 	{
 		std::cerr << "ERROR: can't parse ip address from string '"
 			  << argv[optind] << std::endl;
+		return;
 	}
 	g_opt.ip.sin_port = htons(atoi(argv[++optind]));
 }
