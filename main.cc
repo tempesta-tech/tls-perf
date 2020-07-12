@@ -46,12 +46,14 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/tls1.h>
 
 static const int DEFAULT_THREADS = 1;
 static const int DEFAULT_PEERS = 1;
 static const int PEERS_SLOW_START = 10;
 static const int LATENCY_N = 1024;
-static const char *DEFAULT_CIPHER = "ECDHE-ECDSA-AES128-GCM-SHA256";
+static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
+static const char *DEFAULT_CIPHER_13 = "TLS_AES_256_GCM_SHA384";
 
 struct {
 	int		n_peers;
@@ -61,6 +63,8 @@ struct {
 	uint32_t	ip;
 	uint16_t	port;
 	bool		debug;
+	int		tls_vers;
+	int		use_tickets;
 	const char	*cipher;
 } g_opt;
 
@@ -220,15 +224,26 @@ public:
 	{
 		tls_ = SSL_CTX_new(TLS_client_method());
 
-		// Limit to TLSv1.2 at the moment.
-		SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
-		SSL_CTX_set_max_proto_version(tls_, TLS1_2_VERSION);
+		// Allow only TLS 1.2 and 1.3, and chose only those user has
+		// requested.
+		if (g_opt.tls_vers != TLS_ANY_VERSION) {
+			SSL_CTX_set_min_proto_version(tls_, g_opt.tls_vers);
+			SSL_CTX_set_max_proto_version(tls_, g_opt.tls_vers);
+		} else {
+			SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
+			SSL_CTX_set_max_proto_version(tls_, TLS1_3_VERSION);
+		}
 
-		// No session resumption.
-		SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
+		// Session resumption.
+		if (!g_opt.use_tickets)
+			SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
 
-		// Use SSL_CTX_set_ciphersuites() for TLSv1.3.
-		SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
+		if (g_opt.cipher) {
+			if (g_opt.tls_vers == TLS1_3_VERSION)
+				SSL_CTX_set_ciphersuites(tls_, g_opt.cipher);
+			else if (g_opt.tls_vers == TLS1_2_VERSION)
+				SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
+		}
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -554,16 +569,24 @@ usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
-		<< "  -h,--help    Print this help and exit\n"
-		<< "  -d,--debug   Run in debug mode\n"
-		<< "  -l <N>       Limit parallel connections for each thread"
+		<< "  -h,--help	        Print this help and exit\n"
+		<< "  -d,--debug        Run in debug mode\n"
+		<< "  -l <N>            Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ")\n"
-		<< "  -n <N>       Total number of handshakes to establish\n"
-		<< "  -t <N>       Number of threads"
+		<< "  -n <N>            Total number of handshakes to establish\n"
+		<< "  -t <N>            Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
-		<< "  -T,--to      Duration of the test (in seconds)\n"
-		<< "  -c <cipher>  Force cipher choice (default: "
-		<< DEFAULT_CIPHER << ")\n"
+		<< "  -T,--to           Duration of the test (in seconds)\n"
+		<< "  -c <cipher>       Force cipher choice (default "
+		<< "for TLSv1.2: " << DEFAULT_CIPHER_12 << ",\n"
+		<< "                                                 "
+		<< "for TLSv1.3: " << DEFAULT_CIPHER_13 << "),\n"
+		<< "                                                 "
+		<< "or type 'any' to disable ciphersuite restrictions \n"
+		<< "  -tls_13 version>  Set TLS version for handshake: "
+		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
+		<< "  --use-tickets     Enable TLS Session tickets, (default: "
+		<< "disabled)\n"
 		<< "\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
@@ -576,21 +599,26 @@ usage() noexcept
 static void
 do_getopt(int argc, char *argv[]) noexcept
 {
-	int c, i, o = 0;
+	int c, o = 0;
+	bool defaut_cipher = true;
 
 	g_opt.n_peers = DEFAULT_PEERS;
 	g_opt.n_threads = DEFAULT_THREADS;
 	g_opt.n_hs = ULONG_MAX; // inifinite, in practice
 	g_opt.port = htons(443);
 	g_opt.ip = inet_addr("127.0.0.1");
-	g_opt.cipher = DEFAULT_CIPHER;
+	g_opt.cipher = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
+	g_opt.tls_vers = TLS1_2_VERSION;
+	g_opt.use_tickets = false;
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"debug", no_argument, NULL, 'd'},
 		{"to", no_argument, NULL, 'T'},
+		{"tls", required_argument, NULL, 'V'},
+		{"use_tickets", required_argument, &g_opt.use_tickets, true},
 		{0, 0, 0, 0}
 	};
 
@@ -600,7 +628,9 @@ do_getopt(int argc, char *argv[]) noexcept
 		case 0:
 			break;
 		case 'c':
-			g_opt.cipher = optarg;
+			if (strcmp(optarg, "any"))
+				g_opt.cipher = optarg;
+			defaut_cipher = false;
 			break;
 		case 'd':
 			g_opt.debug = true;
@@ -622,27 +652,61 @@ do_getopt(int argc, char *argv[]) noexcept
 		case 'T':
 			g_opt.timeout = atoi(optarg);
 			break;
+		case 'V':
+			if (!strcmp(optarg, "1.2")) {
+				g_opt.tls_vers = TLS1_2_VERSION;
+			} else if (!strcmp(optarg, "1.3")) {
+				g_opt.tls_vers = TLS1_3_VERSION;
+			} else if (!strcmp(optarg, "any")) {
+				g_opt.tls_vers = TLS_ANY_VERSION;
+			}else {
+				std::cout << "Unknown TLS version, fallback to"
+					     " 1.2\n" << std::endl;
+				g_opt.tls_vers = TLS1_2_VERSION;
+			}
+			break;
 		case 'h':
 		default:
 			usage();
 		}
 	}
+	if (defaut_cipher) {
+		if (g_opt.tls_vers == TLS1_3_VERSION)
+			g_opt.cipher = DEFAULT_CIPHER_13;
+		else
+			g_opt.cipher = DEFAULT_CIPHER_12;
+	}
 
 	if (optind != argc && optind + 2 != argc) {
-		std::cerr << "\nERROR: need to specify both the address"
-			<< " and port or use default values" << std::endl;
+		std::cerr << "\nERROR: either 0 or 2 arguments are allowed: "
+			  << "none for defaults or address and port."
+			  << std::endl;
 		usage();
+		return;
 	}
+	if (optind >= argc)
+		return;
+	g_opt.ip = inet_addr(argv[optind++]);
+	g_opt.port = htons(atoi(argv[optind]));
+}
 
-	i = optind;
-	if (i < argc) {
-		g_opt.ip = inet_addr(argv[i]);
-		i++;
-	}
-	if (i < argc) {
-		g_opt.port = htons(atoi(argv[i]));
-		i++;
-	}
+void
+print_settings()
+{
+	in_addr addr = {g_opt.ip};
+	std::cout << "Running TLS benchmark with following settings:\n"
+		  << "Host:        " << inet_ntoa(addr) << ":"
+		  << ntohs(g_opt.port) << "\n"
+		  << "TLS version: ";
+	if (g_opt.tls_vers == TLS1_2_VERSION)
+		std::cout << "1.2\n";
+	else if (g_opt.tls_vers == TLS1_3_VERSION)
+		std::cout << "1.2\n";
+	else
+		std::cout << "Any of 1.2 or 1.3\n";
+	std::cout << "Cipher:      " << g_opt.cipher << "\n"
+		  << "TLS tickets: " << (bool)g_opt.use_tickets << "\n"
+		  << std::endl;
 }
 
 std::atomic<bool> finish(false), start_stats(false);
@@ -821,6 +885,7 @@ main(int argc, char *argv[])
 	using namespace std::chrono;
 
 	do_getopt(argc, argv);
+	print_settings();
 	update_limits();
 
 	signal(SIGTERM, sig_handler);
@@ -828,8 +893,6 @@ main(int argc, char *argv[])
 
 	SSL_library_init();
 	SSL_load_error_strings();
-
-	std::cout << "Use cipher '" << g_opt.cipher << "'" << std::endl;
 
 	std::vector<std::thread> thr(g_opt.n_threads);
 	for (auto i = 0; i < g_opt.n_threads; ++i) {
