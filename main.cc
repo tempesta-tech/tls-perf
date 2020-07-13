@@ -46,22 +46,26 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/tls1.h>
 
 static const int DEFAULT_THREADS = 1;
 static const int DEFAULT_PEERS = 1;
 static const int PEERS_SLOW_START = 10;
 static const int LATENCY_N = 1024;
-static const char *DEFAULT_CIPHER = "ECDHE-ECDSA-AES128-GCM-SHA256";
+static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
+static const char *DEFAULT_CIPHER_13 = "TLS_AES_256_GCM_SHA384";
 
 struct {
-	int		n_peers;
-	int		n_threads;
-	size_t		n_hs;
-	int		timeout;
-	uint32_t	ip;
-	uint16_t	port;
-	bool		debug;
-	const char	*cipher;
+	int			n_peers;
+	int			n_threads;
+	size_t			n_hs;
+	int			timeout;
+	uint16_t		port;
+	bool			debug;
+	int			tls_vers;
+	int			use_tickets;
+	const char		*cipher;
+	struct sockaddr_in6	ip;
 } g_opt;
 
 struct DbgStream {
@@ -220,15 +224,26 @@ public:
 	{
 		tls_ = SSL_CTX_new(TLS_client_method());
 
-		// Limit to TLSv1.2 at the moment.
-		SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
-		SSL_CTX_set_max_proto_version(tls_, TLS1_2_VERSION);
+		// Allow only TLS 1.2 and 1.3, and chose only those user has
+		// requested.
+		if (g_opt.tls_vers != TLS_ANY_VERSION) {
+			SSL_CTX_set_min_proto_version(tls_, g_opt.tls_vers);
+			SSL_CTX_set_max_proto_version(tls_, g_opt.tls_vers);
+		} else {
+			SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
+			SSL_CTX_set_max_proto_version(tls_, TLS1_3_VERSION);
+		}
 
-		// No session resumption.
-		SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
+		// Session resumption.
+		if (!g_opt.use_tickets)
+			SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
 
-		// Use SSL_CTX_set_ciphersuites() for TLSv1.3.
-		SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
+		if (g_opt.cipher) {
+			if (g_opt.tls_vers == TLS1_3_VERSION)
+				SSL_CTX_set_ciphersuites(tls_, g_opt.cipher);
+			else if (g_opt.tls_vers == TLS1_2_VERSION)
+				SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
+		}
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -338,7 +353,7 @@ private:
 	int			id_;
 	SSL			*tls_;
 	enum _states		state_;
-	struct sockaddr_in	addr_;
+	struct sockaddr_in6	addr_;
 	bool			polled_;
 
 public:
@@ -348,9 +363,7 @@ public:
 	{
 		sd = -1;
 		::memset(&addr_, 0, sizeof(addr_));
-		addr_.sin_family = AF_INET;
-		addr_.sin_port = g_opt.port;
-		addr_.sin_addr.s_addr = g_opt.ip;
+		memcpy(&addr_, &g_opt.ip, sizeof(addr_));
 		dbg_status("created");
 	}
 
@@ -499,12 +512,15 @@ private:
 	bool
 	tcp_connect()
 	{
-		if ((sd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
+		sd = socket(addr_.sin6_family, SOCK_STREAM, IPPROTO_TCP);
+		if (sd < 0)
 			throw Except("cannot create a socket");
 
 		fcntl(sd, F_SETFL, fcntl(sd, F_GETFL, 0) | O_NONBLOCK);
 
-		int r = connect(sd, (struct sockaddr *)&addr_, sizeof(addr_));
+		int sz = (addr_.sin6_family == AF_INET) ? sizeof(sockaddr_in)
+							: sizeof(sockaddr_in6);
+		int r = connect(sd, (struct sockaddr *)&addr_, sz);
 
 		stat.tcp_handshakes++;
 		state_ = STATE_TCP_CONNECTING;
@@ -554,16 +570,24 @@ usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
-		<< "  -h,--help    Print this help and exit\n"
-		<< "  -d,--debug   Run in debug mode\n"
-		<< "  -l <N>       Limit parallel connections for each thread"
+		<< "  -h,--help	        Print this help and exit\n"
+		<< "  -d,--debug        Run in debug mode\n"
+		<< "  -l <N>            Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ")\n"
-		<< "  -n <N>       Total number of handshakes to establish\n"
-		<< "  -t <N>       Number of threads"
+		<< "  -n <N>            Total number of handshakes to establish\n"
+		<< "  -t <N>            Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
-		<< "  -T,--to      Duration of the test (in seconds)\n"
-		<< "  -c <cipher>  Force cipher choice (default: "
-		<< DEFAULT_CIPHER << ")\n"
+		<< "  -T,--to           Duration of the test (in seconds)\n"
+		<< "  -c <cipher>       Force cipher choice (default "
+		<< "for TLSv1.2: " << DEFAULT_CIPHER_12 << ",\n"
+		<< "                                                 "
+		<< "for TLSv1.3: " << DEFAULT_CIPHER_13 << "),\n"
+		<< "                                                 "
+		<< "or type 'any' to disable ciphersuite restrictions \n"
+		<< "  --tls <version>   Set TLS version for handshake: "
+		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
+		<< "  --use-tickets     Enable TLS Session tickets, (default: "
+		<< "disabled)\n"
 		<< "\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
@@ -573,24 +597,56 @@ usage() noexcept
 	exit(0);
 }
 
-static void
+static int
+parse_ipv4(const char *addr, const char *port)
+{
+	memset(&g_opt.ip, 0, sizeof(g_opt.ip));
+
+	sockaddr_in *ipv4 = (sockaddr_in *)&g_opt.ip;
+	if (inet_pton(AF_INET, addr, &ipv4->sin_addr) != 1)
+		return -EINVAL;
+
+	ipv4->sin_family = AF_INET;
+	ipv4->sin_port = htons(atoi(port));
+
+	return 0;
+}
+
+static int
+parse_ipv6(const char *addr, const char *port)
+{
+	memset(&g_opt.ip, 0, sizeof(g_opt.ip));
+
+	if (inet_pton(AF_INET6, addr, &g_opt.ip.sin6_addr) != 1)
+		return -EINVAL;
+
+	g_opt.ip.sin6_family = AF_INET6;
+	g_opt.ip.sin6_port = htons(atoi(port));
+
+	return 0;
+}
+
+static int
 do_getopt(int argc, char *argv[]) noexcept
 {
-	int c, i, o = 0;
+	int c, o = 0;
+	bool defaut_cipher = true;
 
 	g_opt.n_peers = DEFAULT_PEERS;
 	g_opt.n_threads = DEFAULT_THREADS;
-	g_opt.n_hs = ULONG_MAX; // inifinite, in practice
-	g_opt.port = htons(443);
-	g_opt.ip = inet_addr("127.0.0.1");
-	g_opt.cipher = DEFAULT_CIPHER;
+	g_opt.n_hs = ULONG_MAX; // infinite, in practice
+	g_opt.cipher = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
+	g_opt.tls_vers = TLS1_2_VERSION;
+	g_opt.use_tickets = false;
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"debug", no_argument, NULL, 'd'},
 		{"to", no_argument, NULL, 'T'},
+		{"tls", required_argument, NULL, 'V'},
+		{"use_tickets", required_argument, &g_opt.use_tickets, true},
 		{0, 0, 0, 0}
 	};
 
@@ -600,7 +656,9 @@ do_getopt(int argc, char *argv[]) noexcept
 		case 0:
 			break;
 		case 'c':
-			g_opt.cipher = optarg;
+			if (strcmp(optarg, "any"))
+				g_opt.cipher = optarg;
+			defaut_cipher = false;
 			break;
 		case 'd':
 			g_opt.debug = true;
@@ -622,27 +680,76 @@ do_getopt(int argc, char *argv[]) noexcept
 		case 'T':
 			g_opt.timeout = atoi(optarg);
 			break;
+		case 'V':
+			if (!strncmp(optarg, "1.2", 4)) {
+				g_opt.tls_vers = TLS1_2_VERSION;
+			} else if (!strncmp(optarg, "1.3", 4)) {
+				g_opt.tls_vers = TLS1_3_VERSION;
+			} else if (!strncmp(optarg, "any", 4)) {
+				g_opt.tls_vers = TLS_ANY_VERSION;
+			}else {
+				std::cout << "Unknown TLS version, fallback to"
+					     " 1.2\n" << std::endl;
+				g_opt.tls_vers = TLS1_2_VERSION;
+			}
+			break;
 		case 'h':
 		default:
 			usage();
+			return 1;
 		}
+	}
+	if (defaut_cipher) {
+		if (g_opt.tls_vers == TLS1_3_VERSION)
+			g_opt.cipher = DEFAULT_CIPHER_13;
+		else
+			g_opt.cipher = DEFAULT_CIPHER_12;
 	}
 
 	if (optind != argc && optind + 2 != argc) {
-		std::cerr << "\nERROR: need to specify both the address"
-			<< " and port or use default values" << std::endl;
+		std::cerr << "\nERROR: either 0 or 2 arguments are allowed: "
+			  << "none for defaults or address and port."
+			  << std::endl;
 		usage();
+		return -EINVAL;
 	}
+	if (optind >= argc) {
+		parse_ipv4("127.0.0.1", "443");
+		return 0;
+	}
+	const char *addr_str = argv[optind];
+	const char *port_str = argv[++optind];
+	if (parse_ipv4(addr_str, port_str) && parse_ipv6(addr_str, port_str)) {
+		std::cerr << "ERROR: can't parse ip address from string '"
+			  << addr_str << "'" << std::endl;
+		return -EINVAL;
+	}
+	return 0;
+}
 
-	i = optind;
-	if (i < argc) {
-		g_opt.ip = inet_addr(argv[i]);
-		i++;
-	}
-	if (i < argc) {
-		g_opt.port = htons(atoi(argv[i]));
-		i++;
-	}
+void
+print_settings()
+{
+	char str[INET6_ADDRSTRLEN] = {};
+	void *addr = g_opt.ip.sin6_family == AF_INET
+			? (void *)&((sockaddr_in *)&g_opt.ip)->sin_addr
+			: (void *)&g_opt.ip.sin6_addr;
+
+	inet_ntop(g_opt.ip.sin6_family, addr, str, INET6_ADDRSTRLEN);
+	std::cout << "Running TLS benchmark with following settings:\n"
+		  << "Host:        " << str << " : "
+		  << ntohs(g_opt.ip.sin6_port) << "\n"
+		  << "TLS version: ";
+	if (g_opt.tls_vers == TLS1_2_VERSION)
+		std::cout << "1.2\n";
+	else if (g_opt.tls_vers == TLS1_3_VERSION)
+		std::cout << "1.2\n";
+	else
+		std::cout << "Any of 1.2 or 1.3\n";
+	std::cout << "Cipher:      " << g_opt.cipher << "\n"
+		  << "TLS tickets: " << (g_opt.use_tickets ? "on\n" : "off\n")
+		  << "Duration:    " << g_opt.timeout << "\n"
+		  << std::endl;
 }
 
 std::atomic<bool> finish(false), start_stats(false);
@@ -819,8 +926,11 @@ int
 main(int argc, char *argv[])
 {
 	using namespace std::chrono;
+	int r;
 
-	do_getopt(argc, argv);
+	if ((r = do_getopt(argc, argv)))
+		return r;
+	print_settings();
 	update_limits();
 
 	signal(SIGTERM, sig_handler);
@@ -828,8 +938,6 @@ main(int argc, char *argv[])
 
 	SSL_library_init();
 	SSL_load_error_strings();
-
-	std::cout << "Use cipher '" << g_opt.cipher << "'" << std::endl;
 
 	std::vector<std::thread> thr(g_opt.n_threads);
 	for (auto i = 0; i < g_opt.n_threads; ++i) {
