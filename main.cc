@@ -65,7 +65,7 @@ struct {
 	int			tls_vers;
 	int			use_tickets;
 	const char		*cipher;
-	struct sockaddr_in	ip;
+	struct sockaddr_in6	ip;
 } g_opt;
 
 struct DbgStream {
@@ -353,7 +353,7 @@ private:
 	int			id_;
 	SSL			*tls_;
 	enum _states		state_;
-	struct sockaddr_in	addr_;
+	struct sockaddr_in6	addr_;
 	bool			polled_;
 
 public:
@@ -512,13 +512,15 @@ private:
 	bool
 	tcp_connect()
 	{
-		sd = socket(addr_.sin_family, SOCK_STREAM, IPPROTO_TCP);
+		sd = socket(addr_.sin6_family, SOCK_STREAM, IPPROTO_TCP);
 		if (sd < 0)
 			throw Except("cannot create a socket");
 
 		fcntl(sd, F_SETFL, fcntl(sd, F_GETFL, 0) | O_NONBLOCK);
 
-		int r = connect(sd, (struct sockaddr *)&addr_, sizeof(addr_));
+		int sz = (addr_.sin6_family == AF_INET) ? sizeof(sockaddr_in)
+							: sizeof(sockaddr_in6);
+		int r = connect(sd, (struct sockaddr *)&addr_, sz);
 
 		stat.tcp_handshakes++;
 		state_ = STATE_TCP_CONNECTING;
@@ -595,7 +597,36 @@ usage() noexcept
 	exit(0);
 }
 
-static void
+static int
+parse_ipv4(const char *addr, const char *port)
+{
+	memset(&g_opt.ip, 0, sizeof(g_opt.ip));
+
+	sockaddr_in *ipv4 = (sockaddr_in *)&g_opt.ip;
+	if (inet_pton(AF_INET, addr, &ipv4->sin_addr) != 1)
+		return -EINVAL;
+
+	ipv4->sin_family = AF_INET;
+	ipv4->sin_port = htons(atoi(port));
+
+	return 0;
+}
+
+static int
+parse_ipv6(const char *addr, const char *port)
+{
+	memset(&g_opt.ip, 0, sizeof(g_opt.ip));
+
+	if (inet_pton(AF_INET6, addr, &g_opt.ip.sin6_addr) != 1)
+		return -EINVAL;
+
+	g_opt.ip.sin6_family = AF_INET6;
+	g_opt.ip.sin6_port = htons(atoi(port));
+
+	return 0;
+}
+
+static int
 do_getopt(int argc, char *argv[]) noexcept
 {
 	int c, o = 0;
@@ -609,9 +640,6 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
 	g_opt.use_tickets = false;
-	inet_pton(AF_INET, "127.0.0.1", &g_opt.ip.sin_addr);
-	g_opt.ip.sin_family = AF_INET;
-	g_opt.ip.sin_port = htons(443);
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
@@ -668,6 +696,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		case 'h':
 		default:
 			usage();
+			return 1;
 		}
 	}
 	if (defaut_cipher) {
@@ -682,32 +711,34 @@ do_getopt(int argc, char *argv[]) noexcept
 			  << "none for defaults or address and port."
 			  << std::endl;
 		usage();
-		return;
+		return -EINVAL;
 	}
-	if (optind >= argc)
-		return;
-	if (inet_pton(AF_INET, argv[optind], &g_opt.ip.sin_addr) == 1)
-		g_opt.ip.sin_family = AF_INET;
-	else if (inet_pton(AF_INET6, argv[optind], &g_opt.ip.sin_addr) == 1)
-		g_opt.ip.sin_family = AF_INET6;
-	else
-	{
+	if (optind >= argc) {
+		parse_ipv4("127.0.0.1", "443");
+		return 0;
+	}
+	const char *addr_str = argv[optind];
+	const char *port_str = argv[++optind];
+	if (parse_ipv4(addr_str, port_str) && parse_ipv6(addr_str, port_str)) {
 		std::cerr << "ERROR: can't parse ip address from string '"
-			  << argv[optind] << std::endl;
-		return;
+			  << addr_str << "'" << std::endl;
+		return -EINVAL;
 	}
-	g_opt.ip.sin_port = htons(atoi(argv[++optind]));
+	return 0;
 }
 
 void
 print_settings()
 {
 	char str[INET6_ADDRSTRLEN] = {};
+	void *addr = g_opt.ip.sin6_family == AF_INET
+			? (void *)&((sockaddr_in *)&g_opt.ip)->sin_addr
+			: (void *)&g_opt.ip.sin6_addr;
 
-	inet_ntop(g_opt.ip.sin_family, &g_opt.ip.sin_addr, str, INET6_ADDRSTRLEN);
+	inet_ntop(g_opt.ip.sin6_family, addr, str, INET6_ADDRSTRLEN);
 	std::cout << "Running TLS benchmark with following settings:\n"
 		  << "Host:        " << str << " : "
-		  << ntohs(g_opt.ip.sin_port) <<  "\n"
+		  << ntohs(g_opt.ip.sin6_port) << "\n"
 		  << "TLS version: ";
 	if (g_opt.tls_vers == TLS1_2_VERSION)
 		std::cout << "1.2\n";
@@ -716,7 +747,8 @@ print_settings()
 	else
 		std::cout << "Any of 1.2 or 1.3\n";
 	std::cout << "Cipher:      " << g_opt.cipher << "\n"
-		  << "TLS tickets: " << (bool)g_opt.use_tickets << "\n"
+		  << "TLS tickets: " << (g_opt.use_tickets ? "on\n" : "off\n")
+		  << "Duration:    " << g_opt.timeout << "\n"
 		  << std::endl;
 }
 
@@ -894,8 +926,10 @@ int
 main(int argc, char *argv[])
 {
 	using namespace std::chrono;
+	int r;
 
-	do_getopt(argc, argv);
+	if ((r = do_getopt(argc, argv)))
+		return r;
 	print_settings();
 	update_limits();
 
