@@ -80,8 +80,14 @@ you don't need to make additional load before the benchmark.
 
 ```
 $ ./tls-perf -l 1000 -t 2 -T 10 192.168.100.4 443
+Running TLS benchmark with following settings:
+Host:        192.168.100.4 : 443
+TLS version: 1.2
+Cipher:      ECDHE-ECDSA-AES128-GCM-SHA256
+TLS tickets: off
+Duration:    3000
+
 set open files limit to 2008
-Use cipher 'ECDHE-ECDSA-AES128-GCM-SHA256'
 TLS hs in progress 252 [382 h/s], TCP open conns 252 [146 hs in progress], Errors 0
 TLS hs in progress 400 [495 h/s], TCP open conns 400 [497 hs in progress], Errors 0
 TLS hs in progress 549 [620 h/s], TCP open conns 549 [932 hs in progress], Errors 0
