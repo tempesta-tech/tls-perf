@@ -32,18 +32,36 @@ g++ -o tls-perf main.o -lpthread -lssl -lcrypto
 $ ./tls-perf --help
 
 ./tls-perf [options] <ip> <port>
-  -h,--help    Print this help and exit
-  -d,--debug   Run in debug mode
-  -l <N>       Limit parallel connections for each thread (default: 1)
-  -n <N>       Total number of handshakes to establish
-  -t <N>       Number of threads (default: 1).
-  -T,--to      Duration of the test (in seconds)
-  -c <cipher>  Force cipher choice (default: ECDHE-ECDSA-AES128-GCM-SHA256)
+  -h,--help         Print this help and exit
+  -d,--debug        Run in debug mode
+  -l <N>            Limit parallel connections for each thread (default: 1)
+  -n <N>            Total number of handshakes to establish
+  -t <N>            Number of threads (default: 1).
+  -T,--to           Duration of the test (in seconds)
+  -c <cipher>       Force cipher choice (default for TLSv1.2: ECDHE-ECDSA-AES128-GCM-SHA256,
+                                                 for TLSv1.3: TLS_AES_256_GCM_SHA384),
+                                                 or type 'any' to disable ciphersuite restrictions
+  --tls <version>   Set TLS version for handshake: '1.2', '1.3' or 'any' for both (default: '1.2')
+  --use-tickets     Enable TLS Session tickets, (default: disabled)
 
 127.0.0.1:443 address is used by default.
 
 To list available ciphers run command:
 $ nmap --script ssl-enum-ciphers -p <PORT> <IP>
+
+```
+
+## Examples
+
+Bechmark TLS v1.3 handshakes for 10 seconds through 8 threads with 100
+concurrent connections in each tread:
+```
+./tls-perf -T 10 -l 100 -t 8 --tls 1.3 192.168.76.7 8081
+```
+
+Bechmark 100 handshakes, leave TLS version and cipher choise for OpenSSL:
+```
+./tls-perf -n 100 --tls any ::1 8081
 ```
 
 ## Run

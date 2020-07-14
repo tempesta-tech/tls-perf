@@ -570,7 +570,7 @@ usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
-		<< "  -h,--help	        Print this help and exit\n"
+		<< "  -h,--help         Print this help and exit\n"
 		<< "  -d,--debug        Run in debug mode\n"
 		<< "  -l <N>            Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ")\n"
@@ -646,7 +646,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		{"debug", no_argument, NULL, 'd'},
 		{"to", no_argument, NULL, 'T'},
 		{"tls", required_argument, NULL, 'V'},
-		{"use_tickets", required_argument, &g_opt.use_tickets, true},
+		{"use-tickets", no_argument, &g_opt.use_tickets, true},
 		{0, 0, 0, 0}
 	};
 
