@@ -209,6 +209,7 @@ public:
 struct SocketHandler {
 	virtual ~SocketHandler() {};
 	virtual bool next_state() =0;
+	virtual SSL_SESSION* get_session() = 0;
 
 	int sd;
 };
@@ -243,8 +244,17 @@ public:
 		}
 
 		// Session resumption.
-		if (!g_opt.use_tickets)
+		if (!g_opt.use_tickets) {
+			unsigned int mode = SSL_SESS_CACHE_OFF
+					  | SSL_SESS_CACHE_NO_INTERNAL;
 			SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
+			SSL_CTX_set_session_cache_mode(tls_, mode);
+		}
+		else {
+			unsigned int mode = SSL_SESS_CACHE_CLIENT
+					  | SSL_SESS_CACHE_NO_AUTO_CLEAR;
+			SSL_CTX_set_session_cache_mode(tls_, mode);
+		}
 
 		if (g_opt.cipher) {
 			if (g_opt.tls_vers == TLS1_3_VERSION)
@@ -252,7 +262,10 @@ public:
 			else if (g_opt.tls_vers == TLS1_2_VERSION)
 				SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
 		}
-		SSL_CTX_set1_groups_list(tls_, "P-256");
+		// Limit to a single curve/group to avoid extra flexibility
+		if (g_opt.tls_vers != TLS_ANY_VERSION)
+			SSL_CTX_set1_groups_list(tls_, "P-256");
+		SSL_CTX_set_verify(tls_, SSL_VERIFY_NONE, NULL);
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -336,6 +349,12 @@ public:
 			throw Except("cannot clone TLS context");
 
 		SSL_set_fd(ctx, sh->sd);
+		BIO_set_tcp_ndelay(sh->sd, true);
+		if (g_opt.use_tickets) {
+			auto sess = sh->get_session();
+			if (sess)
+				SSL_set_session(ctx, sess);
+		}
 
 		return ctx;
 	}
@@ -353,6 +372,7 @@ private:
 	IO			&io_;
 	int			id_;
 	SSL			*tls_;
+	SSL_SESSION		*sess_;
 	std::chrono::time_point<std::chrono::steady_clock> ts_;
 	enum _states		state_;
 	struct sockaddr_in6	addr_;
@@ -360,7 +380,7 @@ private:
 
 public:
 	Peer(IO &io, int id) noexcept
-		: io_(io), id_(id), tls_(NULL)
+		: io_(io), id_(id), tls_(NULL), sess_(NULL)
 		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
 		sd = -1;
@@ -388,6 +408,12 @@ public:
 			throw Except("bad next state %d", state_);
 		}
 		return false;
+	}
+
+	SSL_SESSION*
+	get_session()
+	{
+		return sess_;
 	}
 
 private:
@@ -536,9 +562,15 @@ private:
 	disconnect() noexcept
 	{
 		if (tls_) {
-			// Make sure session is not kept in cache.
-			// Calling SSL_free() without calling SSL_shutdown will
-			// also remove the session from the session cache.
+			// SSL_shutdown() marks the session as established and
+			// saves it into session cache. Ignore it and just clean
+			// the session if resumed sessions are unwanted.
+			// Even SSL_CTX_set_session_cache_mode() doesn't help to
+			// restrict session cache usage.
+			if (g_opt.use_tickets) {
+				SSL_shutdown(tls_);
+				sess_ = SSL_get_session(tls_);
+			}
 			SSL_free(tls_);
 			tls_ = NULL;
 		}
