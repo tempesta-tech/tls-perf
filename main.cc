@@ -377,7 +377,6 @@ private:
 	SSL_SESSION		*sess_;
 	std::chrono::time_point<std::chrono::steady_clock> ts_;
 	enum _states		state_;
-	struct sockaddr_in6	addr_;
 	bool			polled_;
 
 public:
@@ -386,8 +385,6 @@ public:
 		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
 		sd = -1;
-		::memset(&addr_, 0, sizeof(addr_));
-		memcpy(&addr_, &g_opt.ip, sizeof(addr_));
 		dbg_status("created");
 	}
 
@@ -538,15 +535,15 @@ private:
 	bool
 	tcp_connect()
 	{
-		sd = socket(addr_.sin6_family, SOCK_STREAM, IPPROTO_TCP);
+		sd = socket(g_opt.ip.sin6_family, SOCK_STREAM, IPPROTO_TCP);
 		if (sd < 0)
 			throw Except("cannot create a socket");
 
 		fcntl(sd, F_SETFL, fcntl(sd, F_GETFL, 0) | O_NONBLOCK);
 
-		int sz = (addr_.sin6_family == AF_INET) ? sizeof(sockaddr_in)
-							: sizeof(sockaddr_in6);
-		int r = connect(sd, (struct sockaddr *)&addr_, sz);
+		int sz = (g_opt.ip.sin6_family == AF_INET) ? sizeof(sockaddr_in)
+							   : sizeof(sockaddr_in6);
+		int r = connect(sd, (struct sockaddr *)&g_opt.ip, sz);
 
 		stat.tcp_handshakes++;
 		state_ = STATE_TCP_CONNECTING;
