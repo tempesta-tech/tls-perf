@@ -218,6 +218,14 @@ private:
 	static const size_t N_EVENTS = 128;
 	static const size_t TO_MSEC = 5;
 
+private:
+	int			ed_;
+	int			ev_count_;
+	SSL_CTX			*tls_;
+	struct epoll_event	events_[N_EVENTS];
+	std::list<SocketHandler *> reconnect_q_;
+	std::list<SocketHandler *> backlog_;
+
 public:
 	IO()
 		: ed_(-1), ev_count_(0), tls_(NULL)
@@ -330,14 +338,6 @@ public:
 
 		return ctx;
 	}
-
-private:
-	int			ed_;
-	int			ev_count_;
-	SSL_CTX			*tls_;
-	struct epoll_event	events_[N_EVENTS];
-	std::list<SocketHandler *> reconnect_q_;
-	std::list<SocketHandler *> backlog_;
 };
 
 class Peer : public SocketHandler {
@@ -352,6 +352,7 @@ private:
 	IO			&io_;
 	int			id_;
 	SSL			*tls_;
+	std::chrono::time_point<std::chrono::steady_clock> ts_;
 	enum _states		state_;
 	struct sockaddr_in6	addr_;
 	bool			polled_;
@@ -424,17 +425,13 @@ private:
 		if (!tls_) {
 			tls_ = io_.new_tls_ctx(this);
 			stat.tls_handshakes++;
+			ts_ = steady_clock::now();
 		}
 
-		auto t0(steady_clock::now());
-
 		int r = SSL_connect(tls_);
-
 		if (r == 1) {
-			// Update TLS handshake latency only if a handshakes
-			// happens immediately.
 			auto t1(steady_clock::now());
-			auto lat = duration_cast<microseconds>(t1 - t0).count();
+			auto lat = duration_cast<milliseconds>(t1 - ts_).count();
 			lat_stat.update(lat);
 
 			dbg_status("has completed TLS handshake");
@@ -845,16 +842,16 @@ statistics_dump() noexcept
 		  std::less<int32_t>());
 
 	std::cout << "========================================" << std::endl;
-	std::cout << " TOTAL:                  SECONDS " << stat.measures
+	std::cout << " TOTAL:           SECONDS " << stat.measures
 		<< "; HANDSHAKES " << stat.tot_tls_handshakes << std::endl; 
-	std::cout << " MEASURES (seconds):    "
-		<< " MAX h/s " << stat.max_hs
-		<< "; AVG h/s " << stat.avg_hs
+	std::cout << " HANDSHAKES/sec: "
+		<< " MAX " << stat.max_hs
+		<< "; AVG " << stat.avg_hs
 		// 95% handshakes are faster than this number.
-		<< "; 95P h/s " << stat.hs_history[hsz * 95 / 100]
-		<< "; MIN h/s " << stat.min_hs << std::endl;
+		<< "; 95P " << stat.hs_history[hsz * 95 / 100]
+		<< "; MIN " << stat.min_hs << std::endl;
 
-	std::cout << " LATENCY (microseconds):"
+	std::cout << " LATENCY (ms):   "
 		<< " MIN " << g_lat_stat.stat.front()
 		<< "; AVG " << g_lat_stat.acc_lat / lsz
 		// 95% latencies are smaller than this one.
