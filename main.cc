@@ -53,7 +53,7 @@ static const int DEFAULT_PEERS = 1;
 static const int PEERS_SLOW_START = 10;
 static const int LATENCY_N = 1024;
 static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
-static const char *DEFAULT_CIPHER_13 = "TLS_AES_256_GCM_SHA384";
+static const char *DEFAULT_CIPHER_13 = "TLS_AES_128_GCM_SHA256";
 
 struct {
 	int			n_peers;
@@ -252,6 +252,7 @@ public:
 			else if (g_opt.tls_vers == TLS1_2_VERSION)
 				SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
 		}
+		SSL_CTX_set1_groups_list(tls_, "P-256");
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -740,7 +741,7 @@ print_settings()
 	if (g_opt.tls_vers == TLS1_2_VERSION)
 		std::cout << "1.2\n";
 	else if (g_opt.tls_vers == TLS1_3_VERSION)
-		std::cout << "1.2\n";
+		std::cout << "1.3\n";
 	else
 		std::cout << "Any of 1.2 or 1.3\n";
 	std::cout << "Cipher:      " << g_opt.cipher << "\n"
