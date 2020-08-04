@@ -64,6 +64,7 @@ struct {
 	bool			debug;
 	int			tls_vers;
 	int			use_tickets;
+	int			adv_tickets;
 	const char		*cipher;
 	struct sockaddr_in6	ip;
 } g_opt;
@@ -247,7 +248,8 @@ public:
 		if (!g_opt.use_tickets) {
 			unsigned int mode = SSL_SESS_CACHE_OFF
 					  | SSL_SESS_CACHE_NO_INTERNAL;
-			SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
+			if (!g_opt.adv_tickets)
+				SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
 			SSL_CTX_set_session_cache_mode(tls_, mode);
 		}
 		else {
@@ -616,8 +618,8 @@ usage() noexcept
 		<< "or type 'any' to disable ciphersuite restrictions \n"
 		<< "  --tls <version>   Set TLS version for handshake: "
 		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
-		<< "  --use-tickets     Enable TLS Session tickets, (default: "
-		<< "disabled)\n"
+		<< "  --tickets <mode>  Process TLS Session tickets and session"
+		<< " resumption, 'on', 'off' or 'advertise', (default: 'off')\n"
 		<< "\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
@@ -670,13 +672,14 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
 	g_opt.use_tickets = false;
+	g_opt.adv_tickets = false;
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"debug", no_argument, NULL, 'd'},
 		{"to", no_argument, NULL, 'T'},
 		{"tls", required_argument, NULL, 'V'},
-		{"use-tickets", no_argument, &g_opt.use_tickets, true},
+		{"tickets", required_argument, NULL, 'K'},
 		{0, 0, 0, 0}
 	};
 
@@ -717,6 +720,20 @@ do_getopt(int argc, char *argv[]) noexcept
 				g_opt.tls_vers = TLS1_3_VERSION;
 			} else if (!strncmp(optarg, "any", 4)) {
 				g_opt.tls_vers = TLS_ANY_VERSION;
+			}else {
+				std::cout << "Unknown TLS version, fallback to"
+					     " 1.2\n" << std::endl;
+				g_opt.tls_vers = TLS1_2_VERSION;
+			}
+			break;
+		case 'K':
+			if (!strncmp(optarg, "on", 3)) {
+				g_opt.use_tickets = true;
+			} else if (!strncmp(optarg, "off", 4)) {
+				g_opt.use_tickets = false;
+			} else if (!strncmp(optarg, "advertise", 10)) {
+				g_opt.use_tickets = false;
+				g_opt.adv_tickets = true;
 			}else {
 				std::cout << "Unknown TLS version, fallback to"
 					     " 1.2\n" << std::endl;
@@ -777,7 +794,10 @@ print_settings()
 	else
 		std::cout << "Any of 1.2 or 1.3\n";
 	std::cout << "Cipher:      " << g_opt.cipher << "\n"
-		  << "TLS tickets: " << (g_opt.use_tickets ? "on\n" : "off\n")
+		  << "TLS tickets: " << (g_opt.use_tickets
+					 ? "on\n"
+					 : !g_opt.adv_tickets ? "off\n"
+							      : "advertise\n")
 		  << "Duration:    " << g_opt.timeout << "\n"
 		  << std::endl;
 }
