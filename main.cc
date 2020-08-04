@@ -279,6 +279,8 @@ public:
 		if (ed_ > -1)
 			close(ed_);
 		reconnect_q_.clear();
+		if (tls_)
+			SSL_CTX_free(tls_);
 	}
 
 	void
@@ -391,6 +393,8 @@ public:
 	virtual ~Peer()
 	{
 		disconnect();
+		if (sess_)
+			SSL_SESSION_free(sess_);
 	}
 
 	bool
@@ -567,8 +571,10 @@ private:
 			// Even SSL_CTX_set_session_cache_mode() doesn't help to
 			// restrict session cache usage.
 			if (g_opt.use_tickets) {
+				auto old_sess = sess_;
 				SSL_shutdown(tls_);
-				sess_ = SSL_get_session(tls_);
+				sess_ = SSL_get1_session(tls_);
+				SSL_SESSION_free(old_sess);
 			}
 			SSL_free(tls_);
 			tls_ = NULL;
