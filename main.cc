@@ -223,25 +223,25 @@ private:
 private:
 	int			ed_;
 	int			ev_count_;
-	SSL_CTX			*tls_;
+	SSL_CTX			*tls_ctx_;
 	struct epoll_event	events_[N_EVENTS];
 	std::list<SocketHandler *> reconnect_q_;
 	std::list<SocketHandler *> backlog_;
 
 public:
 	IO()
-		: ed_(-1), ev_count_(0), tls_(NULL)
+		: ed_(-1), ev_count_(0), tls_ctx_(NULL)
 	{
-		tls_ = SSL_CTX_new(TLS_client_method());
+		tls_ctx_ = SSL_CTX_new(TLS_client_method());
 
 		// Allow only TLS 1.2 and 1.3, and chose only those user has
 		// requested.
 		if (g_opt.tls_vers != TLS_ANY_VERSION) {
-			SSL_CTX_set_min_proto_version(tls_, g_opt.tls_vers);
-			SSL_CTX_set_max_proto_version(tls_, g_opt.tls_vers);
+			SSL_CTX_set_min_proto_version(tls_ctx_, g_opt.tls_vers);
+			SSL_CTX_set_max_proto_version(tls_ctx_, g_opt.tls_vers);
 		} else {
-			SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
-			SSL_CTX_set_max_proto_version(tls_, TLS1_3_VERSION);
+			SSL_CTX_set_min_proto_version(tls_ctx_, TLS1_2_VERSION);
+			SSL_CTX_set_max_proto_version(tls_ctx_, TLS1_3_VERSION);
 		}
 
 		// Session resumption.
@@ -249,25 +249,25 @@ public:
 			unsigned int mode = SSL_SESS_CACHE_OFF
 					  | SSL_SESS_CACHE_NO_INTERNAL;
 			if (!g_opt.adv_tickets)
-				SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
-			SSL_CTX_set_session_cache_mode(tls_, mode);
+				SSL_CTX_set_options(tls_ctx_, SSL_OP_NO_TICKET);
+			SSL_CTX_set_session_cache_mode(tls_ctx_, mode);
 		}
 		else {
 			unsigned int mode = SSL_SESS_CACHE_CLIENT
 					  | SSL_SESS_CACHE_NO_AUTO_CLEAR;
-			SSL_CTX_set_session_cache_mode(tls_, mode);
+			SSL_CTX_set_session_cache_mode(tls_ctx_, mode);
 		}
 
 		if (g_opt.cipher) {
 			if (g_opt.tls_vers == TLS1_3_VERSION)
-				SSL_CTX_set_ciphersuites(tls_, g_opt.cipher);
+				SSL_CTX_set_ciphersuites(tls_ctx_, g_opt.cipher);
 			else if (g_opt.tls_vers == TLS1_2_VERSION)
-				SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
+				SSL_CTX_set_cipher_list(tls_ctx_, g_opt.cipher);
 		}
 		// Limit to a single curve/group to avoid extra flexibility
 		if (g_opt.tls_vers != TLS_ANY_VERSION)
-			SSL_CTX_set1_groups_list(tls_, "P-256");
-		SSL_CTX_set_verify(tls_, SSL_VERIFY_NONE, NULL);
+			SSL_CTX_set1_groups_list(tls_ctx_, "P-256");
+		SSL_CTX_set_verify(tls_ctx_, SSL_VERIFY_NONE, NULL);
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -279,8 +279,8 @@ public:
 		if (ed_ > -1)
 			close(ed_);
 		reconnect_q_.clear();
-		if (tls_)
-			SSL_CTX_free(tls_);
+		if (tls_ctx_)
+			SSL_CTX_free(tls_ctx_);
 	}
 
 	void
@@ -348,7 +348,7 @@ public:
 	SSL *
 	new_tls_ctx(SocketHandler *sh)
 	{
-		SSL *ctx = SSL_new(tls_);
+		SSL *ctx = SSL_new(tls_ctx_);
 		if (!ctx)
 			throw Except("cannot clone TLS context");
 
@@ -622,7 +622,9 @@ usage() noexcept
 		<< "  --tls <version>   Set TLS version for handshake: "
 		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
 		<< "  --tickets <mode>  Process TLS Session tickets and session"
-		<< " resumption, 'on', 'off' or 'advertise', (default: 'off')\n"
+		<< " resumption,\n"
+		<< "                    'on', 'off' or 'advertise', "
+		<< "(default: 'off')\n"
 		<< "\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"

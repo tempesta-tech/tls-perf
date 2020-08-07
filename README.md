@@ -39,10 +39,11 @@ $ ./tls-perf --help
   -t <N>            Number of threads (default: 1).
   -T,--to           Duration of the test (in seconds)
   -c <cipher>       Force cipher choice (default for TLSv1.2: ECDHE-ECDSA-AES128-GCM-SHA256,
-                                                 for TLSv1.3: TLS_AES_256_GCM_SHA384),
+                                                 for TLSv1.3: TLS_AES_128_GCM_SHA256),
                                                  or type 'any' to disable ciphersuite restrictions
   --tls <version>   Set TLS version for handshake: '1.2', '1.3' or 'any' for both (default: '1.2')
-  --use-tickets     Enable TLS Session tickets, (default: disabled)
+  --tickets <mode>  Process TLS Session tickets and session resumption,
+                    'on', 'off' or 'advertise', (default: 'off')
 
 127.0.0.1:443 address is used by default.
 
