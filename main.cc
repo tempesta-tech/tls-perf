@@ -53,7 +53,7 @@ static const int DEFAULT_PEERS = 1;
 static const int PEERS_SLOW_START = 10;
 static const int LATENCY_N = 1024;
 static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
-static const char *DEFAULT_CIPHER_13 = "TLS_AES_256_GCM_SHA384";
+static const char *DEFAULT_CIPHER_13 = "TLS_AES_128_GCM_SHA256";
 
 struct {
 	int			n_peers;
@@ -64,6 +64,7 @@ struct {
 	bool			debug;
 	int			tls_vers;
 	int			use_tickets;
+	int			adv_tickets;
 	const char		*cipher;
 	struct sockaddr_in6	ip;
 } g_opt;
@@ -209,6 +210,7 @@ public:
 struct SocketHandler {
 	virtual ~SocketHandler() {};
 	virtual bool next_state() =0;
+	virtual SSL_SESSION* get_session() = 0;
 
 	int sd;
 };
@@ -221,37 +223,51 @@ private:
 private:
 	int			ed_;
 	int			ev_count_;
-	SSL_CTX			*tls_;
+	SSL_CTX			*tls_ctx_;
 	struct epoll_event	events_[N_EVENTS];
 	std::list<SocketHandler *> reconnect_q_;
 	std::list<SocketHandler *> backlog_;
 
 public:
 	IO()
-		: ed_(-1), ev_count_(0), tls_(NULL)
+		: ed_(-1), ev_count_(0), tls_ctx_(NULL)
 	{
-		tls_ = SSL_CTX_new(TLS_client_method());
+		tls_ctx_ = SSL_CTX_new(TLS_client_method());
 
 		// Allow only TLS 1.2 and 1.3, and chose only those user has
 		// requested.
 		if (g_opt.tls_vers != TLS_ANY_VERSION) {
-			SSL_CTX_set_min_proto_version(tls_, g_opt.tls_vers);
-			SSL_CTX_set_max_proto_version(tls_, g_opt.tls_vers);
+			SSL_CTX_set_min_proto_version(tls_ctx_, g_opt.tls_vers);
+			SSL_CTX_set_max_proto_version(tls_ctx_, g_opt.tls_vers);
 		} else {
-			SSL_CTX_set_min_proto_version(tls_, TLS1_2_VERSION);
-			SSL_CTX_set_max_proto_version(tls_, TLS1_3_VERSION);
+			SSL_CTX_set_min_proto_version(tls_ctx_, TLS1_2_VERSION);
+			SSL_CTX_set_max_proto_version(tls_ctx_, TLS1_3_VERSION);
 		}
 
 		// Session resumption.
-		if (!g_opt.use_tickets)
-			SSL_CTX_set_options(tls_, SSL_OP_NO_TICKET);
+		if (!g_opt.use_tickets) {
+			unsigned int mode = SSL_SESS_CACHE_OFF
+					  | SSL_SESS_CACHE_NO_INTERNAL;
+			if (!g_opt.adv_tickets)
+				SSL_CTX_set_options(tls_ctx_, SSL_OP_NO_TICKET);
+			SSL_CTX_set_session_cache_mode(tls_ctx_, mode);
+		}
+		else {
+			unsigned int mode = SSL_SESS_CACHE_CLIENT
+					  | SSL_SESS_CACHE_NO_AUTO_CLEAR;
+			SSL_CTX_set_session_cache_mode(tls_ctx_, mode);
+		}
 
 		if (g_opt.cipher) {
 			if (g_opt.tls_vers == TLS1_3_VERSION)
-				SSL_CTX_set_ciphersuites(tls_, g_opt.cipher);
+				SSL_CTX_set_ciphersuites(tls_ctx_, g_opt.cipher);
 			else if (g_opt.tls_vers == TLS1_2_VERSION)
-				SSL_CTX_set_cipher_list(tls_, g_opt.cipher);
+				SSL_CTX_set_cipher_list(tls_ctx_, g_opt.cipher);
 		}
+		// Limit to a single curve/group to avoid extra flexibility
+		if (g_opt.tls_vers != TLS_ANY_VERSION)
+			SSL_CTX_set1_groups_list(tls_ctx_, "P-256");
+		SSL_CTX_set_verify(tls_ctx_, SSL_VERIFY_NONE, NULL);
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -263,6 +279,8 @@ public:
 		if (ed_ > -1)
 			close(ed_);
 		reconnect_q_.clear();
+		if (tls_ctx_)
+			SSL_CTX_free(tls_ctx_);
 	}
 
 	void
@@ -330,11 +348,17 @@ public:
 	SSL *
 	new_tls_ctx(SocketHandler *sh)
 	{
-		SSL *ctx = SSL_new(tls_);
+		SSL *ctx = SSL_new(tls_ctx_);
 		if (!ctx)
 			throw Except("cannot clone TLS context");
 
 		SSL_set_fd(ctx, sh->sd);
+		BIO_set_tcp_ndelay(sh->sd, true);
+		if (g_opt.use_tickets) {
+			auto sess = sh->get_session();
+			if (sess)
+				SSL_set_session(ctx, sess);
+		}
 
 		return ctx;
 	}
@@ -352,25 +376,25 @@ private:
 	IO			&io_;
 	int			id_;
 	SSL			*tls_;
+	SSL_SESSION		*sess_;
 	std::chrono::time_point<std::chrono::steady_clock> ts_;
 	enum _states		state_;
-	struct sockaddr_in6	addr_;
 	bool			polled_;
 
 public:
 	Peer(IO &io, int id) noexcept
-		: io_(io), id_(id), tls_(NULL)
+		: io_(io), id_(id), tls_(NULL), sess_(NULL)
 		, state_(STATE_TCP_CONNECT), polled_(false)
 	{
 		sd = -1;
-		::memset(&addr_, 0, sizeof(addr_));
-		memcpy(&addr_, &g_opt.ip, sizeof(addr_));
 		dbg_status("created");
 	}
 
 	virtual ~Peer()
 	{
 		disconnect();
+		if (sess_)
+			SSL_SESSION_free(sess_);
 	}
 
 	bool
@@ -387,6 +411,12 @@ public:
 			throw Except("bad next state %d", state_);
 		}
 		return false;
+	}
+
+	SSL_SESSION*
+	get_session()
+	{
+		return sess_;
 	}
 
 private:
@@ -509,15 +539,15 @@ private:
 	bool
 	tcp_connect()
 	{
-		sd = socket(addr_.sin6_family, SOCK_STREAM, IPPROTO_TCP);
+		sd = socket(g_opt.ip.sin6_family, SOCK_STREAM, IPPROTO_TCP);
 		if (sd < 0)
 			throw Except("cannot create a socket");
 
 		fcntl(sd, F_SETFL, fcntl(sd, F_GETFL, 0) | O_NONBLOCK);
 
-		int sz = (addr_.sin6_family == AF_INET) ? sizeof(sockaddr_in)
-							: sizeof(sockaddr_in6);
-		int r = connect(sd, (struct sockaddr *)&addr_, sz);
+		int sz = (g_opt.ip.sin6_family == AF_INET) ? sizeof(sockaddr_in)
+							   : sizeof(sockaddr_in6);
+		int r = connect(sd, (struct sockaddr *)&g_opt.ip, sz);
 
 		stat.tcp_handshakes++;
 		state_ = STATE_TCP_CONNECTING;
@@ -535,9 +565,17 @@ private:
 	disconnect() noexcept
 	{
 		if (tls_) {
-			// Make sure session is not kept in cache.
-			// Calling SSL_free() without calling SSL_shutdown will
-			// also remove the session from the session cache.
+			// SSL_shutdown() marks the session as established and
+			// saves it into session cache. Ignore it and just clean
+			// the session if resumed sessions are unwanted.
+			// Even SSL_CTX_set_session_cache_mode() doesn't help to
+			// restrict session cache usage.
+			if (g_opt.use_tickets) {
+				auto old_sess = sess_;
+				SSL_shutdown(tls_);
+				sess_ = SSL_get1_session(tls_);
+				SSL_SESSION_free(old_sess);
+			}
 			SSL_free(tls_);
 			tls_ = NULL;
 		}
@@ -583,8 +621,10 @@ usage() noexcept
 		<< "or type 'any' to disable ciphersuite restrictions \n"
 		<< "  --tls <version>   Set TLS version for handshake: "
 		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
-		<< "  --use-tickets     Enable TLS Session tickets, (default: "
-		<< "disabled)\n"
+		<< "  --tickets <mode>  Process TLS Session tickets and session"
+		<< " resumption,\n"
+		<< "                    'on', 'off' or 'advertise', "
+		<< "(default: 'off')\n"
 		<< "\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
@@ -637,13 +677,14 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
 	g_opt.use_tickets = false;
+	g_opt.adv_tickets = false;
 
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"debug", no_argument, NULL, 'd'},
 		{"to", no_argument, NULL, 'T'},
 		{"tls", required_argument, NULL, 'V'},
-		{"use-tickets", no_argument, &g_opt.use_tickets, true},
+		{"tickets", required_argument, NULL, 'K'},
 		{0, 0, 0, 0}
 	};
 
@@ -684,6 +725,20 @@ do_getopt(int argc, char *argv[]) noexcept
 				g_opt.tls_vers = TLS1_3_VERSION;
 			} else if (!strncmp(optarg, "any", 4)) {
 				g_opt.tls_vers = TLS_ANY_VERSION;
+			}else {
+				std::cout << "Unknown TLS version, fallback to"
+					     " 1.2\n" << std::endl;
+				g_opt.tls_vers = TLS1_2_VERSION;
+			}
+			break;
+		case 'K':
+			if (!strncmp(optarg, "on", 3)) {
+				g_opt.use_tickets = true;
+			} else if (!strncmp(optarg, "off", 4)) {
+				g_opt.use_tickets = false;
+			} else if (!strncmp(optarg, "advertise", 10)) {
+				g_opt.use_tickets = false;
+				g_opt.adv_tickets = true;
 			}else {
 				std::cout << "Unknown TLS version, fallback to"
 					     " 1.2\n" << std::endl;
@@ -740,11 +795,14 @@ print_settings()
 	if (g_opt.tls_vers == TLS1_2_VERSION)
 		std::cout << "1.2\n";
 	else if (g_opt.tls_vers == TLS1_3_VERSION)
-		std::cout << "1.2\n";
+		std::cout << "1.3\n";
 	else
 		std::cout << "Any of 1.2 or 1.3\n";
 	std::cout << "Cipher:      " << g_opt.cipher << "\n"
-		  << "TLS tickets: " << (g_opt.use_tickets ? "on\n" : "off\n")
+		  << "TLS tickets: " << (g_opt.use_tickets
+					 ? "on\n"
+					 : !g_opt.adv_tickets ? "off\n"
+							      : "advertise\n")
 		  << "Duration:    " << g_opt.timeout << "\n"
 		  << std::endl;
 }
