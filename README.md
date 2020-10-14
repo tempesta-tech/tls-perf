@@ -60,7 +60,7 @@ concurrent connections in each tread:
 ./tls-perf -T 10 -l 100 -t 8 --tls 1.3 192.168.76.7 8081
 ```
 
-Bechmark 100 handshakes, leave TLS version and cipher choise for OpenSSL:
+Bechmark 100 handshakes, leave TLS version and cipher choice for OpenSSL:
 ```
 ./tls-perf -n 100 --tls any ::1 8081
 ```
@@ -73,7 +73,7 @@ Bechmark 100 handshakes, leave TLS version and cipher choise for OpenSSL:
 ```
 This time all the requested peers managing all the requested connections are
 active and **tls-perf** starts to gather statistics for the final report. Thus,
-you might seem smaller number for `MEASURES` than you saw per-second statistic
+you might see smaller number for `MEASURES` than you saw per-second statistic
 lines.
 
 The slow start also warms up all the caches of the benchmarked system, so
