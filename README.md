@@ -44,6 +44,7 @@ $ ./tls-perf --help
   --tls <version>   Set TLS version for handshake: '1.2', '1.3' or 'any' for both (default: '1.2')
   --tickets <mode>  Process TLS Session tickets and session resumption,
                     'on', 'off' or 'advertise', (default: 'off')
+  --keylogfile <f>  File to dump keys for traffic analysers
 
 127.0.0.1:443 address is used by default.
 
