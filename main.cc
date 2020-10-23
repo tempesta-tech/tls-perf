@@ -55,6 +55,19 @@ static const int LATENCY_N = 1024;
 static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
 static const char *DEFAULT_CIPHER_13 = "TLS_AES_128_GCM_SHA256";
 
+// Dump shared keys for Wireshark analysis
+static BIO *bio_keylog;
+void
+keylog(const SSL *tls, const char *line)
+{
+	// There might be concurrent writers to the keylog file, ensure
+	// that the given line is written at once.
+	if (bio_keylog) {
+		BIO_printf(bio_keylog, "%s\n", line);
+		BIO_flush(bio_keylog);
+	}
+}
+
 struct {
 	int			n_peers;
 	int			n_threads;
@@ -66,6 +79,7 @@ struct {
 	int			use_tickets;
 	int			adv_tickets;
 	const char		*cipher;
+	const char		*keylogfile;
 	struct sockaddr_in6	ip;
 } g_opt;
 
@@ -268,6 +282,8 @@ public:
 		if (g_opt.tls_vers != TLS_ANY_VERSION)
 			SSL_CTX_set1_groups_list(tls_ctx_, "P-256");
 		SSL_CTX_set_verify(tls_ctx_, SSL_VERIFY_NONE, NULL);
+		if (g_opt.keylogfile)
+			SSL_CTX_set_keylog_callback(tls_ctx_, keylog);
 
 		if ((ed_ = epoll_create(1)) < 0)
 			throw std::string("can't create epoll");
@@ -279,6 +295,7 @@ public:
 		if (ed_ > -1)
 			close(ed_);
 		reconnect_q_.clear();
+		SSL_CTX_set_keylog_callback(tls_ctx_, nullptr);
 		if (tls_ctx_)
 			SSL_CTX_free(tls_ctx_);
 	}
@@ -625,7 +642,8 @@ usage() noexcept
 		<< " resumption,\n"
 		<< "                    'on', 'off' or 'advertise', "
 		<< "(default: 'off')\n"
-		<< "\n"
+		<< "  --keylogfile <f>  File to dump keys for traffic analysers"
+		<< "\n\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
 		<< "To list available ciphers run command:\n"
@@ -673,6 +691,7 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.n_threads = DEFAULT_THREADS;
 	g_opt.n_hs = ULONG_MAX; // infinite, in practice
 	g_opt.cipher = NULL;
+	g_opt.keylogfile = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
@@ -685,6 +704,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		{"to", no_argument, NULL, 'T'},
 		{"tls", required_argument, NULL, 'V'},
 		{"tickets", required_argument, NULL, 'K'},
+		{"keylogfile", required_argument, NULL, 'F'},
 		{0, 0, 0, 0}
 	};
 
@@ -745,6 +765,9 @@ do_getopt(int argc, char *argv[]) noexcept
 				g_opt.tls_vers = TLS1_2_VERSION;
 			}
 			break;
+		case 'F':
+			g_opt.keylogfile = optarg;
+			break;
 		case 'h':
 		default:
 			usage();
@@ -756,6 +779,15 @@ do_getopt(int argc, char *argv[]) noexcept
 			g_opt.cipher = DEFAULT_CIPHER_13;
 		else
 			g_opt.cipher = DEFAULT_CIPHER_12;
+	}
+	if (g_opt.keylogfile) {
+		// Don't drop previously saved keys
+		bio_keylog = BIO_new_file(g_opt.keylogfile, "a");
+		if (!bio_keylog) {
+			std::cerr << "Error writing keylog file '"
+				  << g_opt.keylogfile << "'" << std::endl;
+			return -ENOENT;
+		}
 	}
 
 	if (optind != argc && optind + 2 != argc) {
@@ -983,8 +1015,10 @@ main(int argc, char *argv[])
 	using namespace std::chrono;
 	int r;
 
-	if ((r = do_getopt(argc, argv)))
+	if ((r = do_getopt(argc, argv))) {
+		BIO_free_all(bio_keylog);
 		return r;
+	}
 	print_settings();
 	update_limits();
 
@@ -1026,6 +1060,7 @@ main(int argc, char *argv[])
 		t.join();
 
 	statistics_dump();
+	BIO_free_all(bio_keylog);
 
 	return 0;
 }
