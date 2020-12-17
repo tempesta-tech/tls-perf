@@ -606,6 +606,11 @@ private:
 			}
 
 			// Disable TIME-WAIT state, close immediately.
+			// This leads to connection terminations with RST and
+			// on high traffic valume you may see large number of
+			// ESTABLISHED connections, which will be terminated by
+			// the OS on timeout.
+			// https://github.com/tempesta-tech/tempesta/issues/1432
 			struct linger sl = { .l_onoff = 1, .l_linger = 0 };
 			setsockopt(sd, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
 			close(sd);
