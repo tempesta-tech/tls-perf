@@ -1,7 +1,7 @@
 /**
  *		TLS handshakes benchmarking tool.
  *
- * Copyright (C) 2020 Tempesta Technologies, INC.
+ * Copyright (C) 2020-2021 Tempesta Technologies, INC.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
@@ -75,6 +75,7 @@ struct {
 	int			timeout;
 	uint16_t		port;
 	bool			debug;
+	bool			quiet;
 	int			tls_vers;
 	int			use_tickets;
 	int			adv_tickets;
@@ -629,6 +630,7 @@ usage() noexcept
 		<< "./tls-perf [options] <ip> <port>\n"
 		<< "  -h,--help         Print this help and exit\n"
 		<< "  -d,--debug        Run in debug mode\n"
+		<< "  -q,--quet         Show less statistics in the run time\n"
 		<< "  -l <N>            Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ")\n"
 		<< "  -n <N>            Total number of handshakes to establish\n"
@@ -706,6 +708,7 @@ do_getopt(int argc, char *argv[]) noexcept
 	static struct option long_opts[] = {
 		{"help", no_argument, NULL, 'h'},
 		{"debug", no_argument, NULL, 'd'},
+		{"quiet", no_argument, NULL, 'q'},
 		{"to", no_argument, NULL, 'T'},
 		{"tls", required_argument, NULL, 'V'},
 		{"tickets", required_argument, NULL, 'K'},
@@ -713,7 +716,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		{0, 0, 0, 0}
 	};
 
-	while ((c = getopt_long(argc, argv, "hl:c:dt:n:T:", long_opts, &o)) != -1)
+	while ((c = getopt_long(argc, argv, "hl:c:dqt:n:T:", long_opts, &o)) != -1)
 	{
 		switch (c) {
 		case 0:
@@ -725,6 +728,9 @@ do_getopt(int argc, char *argv[]) noexcept
 			break;
 		case 'd':
 			g_opt.debug = true;
+			break;
+		case 'q':
+			g_opt.quiet = true;
 			break;
 		case 'l':
 			g_opt.n_peers = atoi(optarg);
@@ -864,7 +870,8 @@ update_limits() noexcept
 	if (open_file_limit.rlim_cur > req_fd_n)
 		return;
 
-	std::cout << "set open files limit to " << req_fd_n << std::endl;
+	if (!g_opt.quiet)
+		std::cout << "set open files limit to " << req_fd_n << std::endl;
 	open_file_limit.rlim_cur = req_fd_n;
 	if (setrlimit(RLIMIT_NOFILE, &open_file_limit)) {
 		g_opt.n_peers = open_file_limit.rlim_cur / (g_opt.n_threads + 4);
@@ -895,11 +902,12 @@ statistics_update() noexcept
 	stat.tls_connections -= tls_conns;
 
 	int32_t curr_hs = (size_t)(1000 * tls_conns) / dt;
-	std::cout << "TLS hs in progress " << stat.tls_handshakes
-		<< " [" << curr_hs << " h/s],"
-		<< " TCP open conns " << stat.tcp_connections
-		<< " [" << stat.tcp_handshakes << " hs in progress],"
-		<< " Errors " << stat.error_count << std::endl;
+	if (!g_opt.quiet)
+		std::cout << "TLS hs in progress " << stat.tls_handshakes
+			<< " [" << curr_hs << " h/s],"
+			<< " TCP open conns " << stat.tcp_connections
+			<< " [" << stat.tcp_handshakes << " hs in progress],"
+			<< " Errors " << stat.error_count << std::endl;
 
 	if (!start_stats)
 		return;
@@ -1024,7 +1032,8 @@ main(int argc, char *argv[])
 		BIO_free_all(bio_keylog);
 		return r;
 	}
-	print_settings();
+	if (!g_opt.quiet)
+		print_settings();
 	update_limits();
 
 	signal(SIGTERM, sig_handler);

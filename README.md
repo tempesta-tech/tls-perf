@@ -34,6 +34,7 @@ $ ./tls-perf --help
 ./tls-perf [options] <ip> <port>
   -h,--help         Print this help and exit
   -d,--debug        Run in debug mode
+  -q,--quet         Show less statistics in the run time
   -l <N>            Limit parallel connections for each thread (default: 1)
   -n <N>            Total number of handshakes to establish
   -t <N>            Number of threads (default: 1).
