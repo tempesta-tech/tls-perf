@@ -932,7 +932,7 @@ statistics_dump() noexcept
 	auto hsz = stat.hs_history.size();
 	auto lsz = g_lat_stat.stat.size();
 
-	if (!start_stats || hsz < 1) {
+	if (!start_stats || hsz < 1 || lsz < 1) {
 		std::cerr << "ERROR: not enough statistics collected"
 			<< std::endl;
 		return;
