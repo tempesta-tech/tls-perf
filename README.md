@@ -39,9 +39,7 @@ $ ./tls-perf --help
   -n <N>            Total number of handshakes to establish
   -t <N>            Number of threads (default: 1).
   -T,--to           Duration of the test (in seconds)
-  -c <cipher>       Force cipher choice (default for TLSv1.2: ECDHE-ECDSA-AES128-GCM-SHA256,
-                                                 for TLSv1.3: TLS_AES_128_GCM_SHA256),
-                                                 or type 'any' to disable ciphersuite restrictions
+  -c <cipher>       Force cipher choice (use `openssl ciphers` to list available cipher suites),
   --tls <version>   Set TLS version for handshake: '1.2', '1.3' or 'any' for both (default: '1.2')
   --tickets <mode>  Process TLS Session tickets and session resumption,
                     'on', 'off' or 'advertise', (default: 'off')
@@ -111,4 +109,5 @@ TLS hs in progress 941 [585 h/s], TCP open conns 941 [1059 hs in progress], Erro
 `95P` parameters in resulting statistics show 95'th percentile: 95% of TLS
 handshakes per second measurements are better than the number and 95% of TLS
 handshakes require less microseconds than the number.
+
 

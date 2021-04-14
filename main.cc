@@ -52,8 +52,6 @@ static const int DEFAULT_THREADS = 1;
 static const int DEFAULT_PEERS = 1;
 static const int PEERS_SLOW_START = 10;
 static const int LATENCY_N = 1024;
-static const char *DEFAULT_CIPHER_12 = "ECDHE-ECDSA-AES128-GCM-SHA256";
-static const char *DEFAULT_CIPHER_13 = "TLS_AES_128_GCM_SHA256";
 
 // Dump shared keys for Wireshark analysis
 static BIO *bio_keylog;
@@ -637,12 +635,8 @@ usage() noexcept
 		<< "  -t <N>            Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
 		<< "  -T,--to           Duration of the test (in seconds)\n"
-		<< "  -c <cipher>       Force cipher choice (default "
-		<< "for TLSv1.2: " << DEFAULT_CIPHER_12 << ",\n"
-		<< "                                                 "
-		<< "for TLSv1.3: " << DEFAULT_CIPHER_13 << "),\n"
-		<< "                                                 "
-		<< "or type 'any' to disable ciphersuite restrictions \n"
+		<< "  -c <cipher>       Force cipher choice (use `openssl ciphers`"
+		<< " to list available cipher suites),\n"
 		<< "  --tls <version>   Set TLS version for handshake: "
 		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
 		<< "  --tickets <mode>  Process TLS Session tickets and session"
@@ -692,7 +686,6 @@ static int
 do_getopt(int argc, char *argv[]) noexcept
 {
 	int c, o = 0;
-	bool defaut_cipher = true;
 
 	g_opt.n_peers = DEFAULT_PEERS;
 	g_opt.n_threads = DEFAULT_THREADS;
@@ -722,9 +715,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		case 0:
 			break;
 		case 'c':
-			if (strcmp(optarg, "any"))
-				g_opt.cipher = optarg;
-			defaut_cipher = false;
+			g_opt.cipher = optarg;
 			break;
 		case 'd':
 			g_opt.debug = true;
@@ -785,12 +776,6 @@ do_getopt(int argc, char *argv[]) noexcept
 			return 1;
 		}
 	}
-	if (defaut_cipher) {
-		if (g_opt.tls_vers == TLS1_3_VERSION)
-			g_opt.cipher = DEFAULT_CIPHER_13;
-		else
-			g_opt.cipher = DEFAULT_CIPHER_12;
-	}
 	if (g_opt.keylogfile) {
 		// Don't drop previously saved keys
 		bio_keylog = BIO_new_file(g_opt.keylogfile, "a");
@@ -841,7 +826,7 @@ print_settings()
 		std::cout << "1.3\n";
 	else
 		std::cout << "Any of 1.2 or 1.3\n";
-	std::cout << "Cipher:      " << g_opt.cipher << "\n"
+	std::cout << "Cipher:      " << (g_opt.cipher ? : "default") << "\n"
 		  << "TLS tickets: " << (g_opt.use_tickets
 					 ? "on\n"
 					 : !g_opt.adv_tickets ? "off\n"
