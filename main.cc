@@ -78,6 +78,7 @@ struct {
 	int			use_tickets;
 	int			adv_tickets;
 	const char		*cipher;
+	const char		*curve;
 	const char		*keylogfile;
 	struct sockaddr_in6	ip;
 } g_opt;
@@ -272,14 +273,20 @@ public:
 		}
 
 		if (g_opt.cipher) {
-			if (g_opt.tls_vers == TLS1_3_VERSION)
-				SSL_CTX_set_ciphersuites(tls_ctx_, g_opt.cipher);
-			else if (g_opt.tls_vers == TLS1_2_VERSION)
-				SSL_CTX_set_cipher_list(tls_ctx_, g_opt.cipher);
+			if (g_opt.tls_vers == TLS1_3_VERSION
+			    || g_opt.tls_vers == TLS_ANY_VERSION)
+				if (!SSL_CTX_set_ciphersuites(tls_ctx_,
+							      g_opt.cipher))
+					throw std::string("cannot set cipher");
+			if (g_opt.tls_vers == TLS1_2_VERSION
+			    || g_opt.tls_vers == TLS_ANY_VERSION)
+				if (SSL_CTX_set_cipher_list(tls_ctx_,
+							    g_opt.cipher))
+					throw std::string("cannot set cipher");
 		}
-		// Limit to a single curve/group to avoid extra flexibility
-		if (g_opt.tls_vers != TLS_ANY_VERSION)
-			SSL_CTX_set1_groups_list(tls_ctx_, "P-256");
+		if (g_opt.curve)
+			if (!SSL_CTX_set1_groups_list(tls_ctx_, g_opt.curve))
+				throw std::string("cannot set elliptic curve");
 		SSL_CTX_set_verify(tls_ctx_, SSL_VERIFY_NONE, NULL);
 		if (g_opt.keylogfile)
 			SSL_CTX_set_keylog_callback(tls_ctx_, keylog);
@@ -626,28 +633,33 @@ usage() noexcept
 {
 	std::cout << "\n"
 		<< "./tls-perf [options] <ip> <port>\n"
-		<< "  -h,--help         Print this help and exit\n"
-		<< "  -d,--debug        Run in debug mode\n"
-		<< "  -q,--quet         Show less statistics in the run time\n"
-		<< "  -l <N>            Limit parallel connections for each thread"
+		<< "  -h,--help            Print this help and exit\n"
+		<< "  -d,--debug           Run in debug mode\n"
+		<< "  -q,--quet            Show less statistics in the run time\n"
+		<< "  -l <N>               Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ")\n"
-		<< "  -n <N>            Total number of handshakes to establish\n"
-		<< "  -t <N>            Number of threads"
+		<< "  -n <N>               Total number of handshakes to establish\n"
+		<< "  -t <N>               Number of threads"
 		<< " (default: " << DEFAULT_THREADS << ").\n"
-		<< "  -T,--to           Duration of the test (in seconds)\n"
-		<< "  -c <cipher>       Force cipher choice (use `openssl ciphers`"
-		<< " to list available cipher suites),\n"
-		<< "  --tls <version>   Set TLS version for handshake: "
-		<< "'1.2', '1.3' or 'any' for both (default: '1.2')\n"
-		<< "  --tickets <mode>  Process TLS Session tickets and session"
-		<< " resumption,\n"
-		<< "                    'on', 'off' or 'advertise', "
+		<< "  -T,--to              Duration of the test (in seconds)\n"
+		<< "  -c <cipher>          Force cipher choice\n"
+		<< "                       (use `openssl ciphers` to list available"
+					   " cipher suites),\n"
+		<< "  -C <curve>           Force specific curve for elliptic curve"
+					   " algorithms (use\n"
+		<< "                       `openssl ecparam -list_curves`"
+					   " to list available curves).\n"
+		<< "  -V,--tls <version>   Set TLS version for handshake:\n"
+		<< "                       '1.2', '1.3' or 'any' for both (default: '1.2')\n"
+		<< "  -K,--tickets <mode>  Process TLS Session tickets and session"
+					   " resumption,\n"
+		<< "                       'on', 'off' or 'advertise', "
 		<< "(default: 'off')\n"
-		<< "  --keylogfile <f>  File to dump keys for traffic analysers"
+		<< "  -F,--keylogfile <f>  File to dump keys for traffic analysers"
 		<< "\n\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
-		<< "To list available ciphers run command:\n"
+		<< "To list available ciphers on a remote peer use:\n"
 		<< "$ nmap --script ssl-enum-ciphers -p <PORT> <IP>\n"
 		<< std::endl;
 	exit(0);
@@ -691,6 +703,7 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.n_threads = DEFAULT_THREADS;
 	g_opt.n_hs = ULONG_MAX; // infinite, in practice
 	g_opt.cipher = NULL;
+	g_opt.curve = NULL;
 	g_opt.keylogfile = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
@@ -709,13 +722,17 @@ do_getopt(int argc, char *argv[]) noexcept
 		{0, 0, 0, 0}
 	};
 
-	while ((c = getopt_long(argc, argv, "hl:c:dqt:n:T:", long_opts, &o)) != -1)
+	while ((c = getopt_long(argc, argv, "hl:c:C:dqt:n:T:", long_opts, &o))
+		!= -1)
 	{
 		switch (c) {
 		case 0:
 			break;
 		case 'c':
 			g_opt.cipher = optarg;
+			break;
+		case 'C':
+			g_opt.curve = optarg;
 			break;
 		case 'd':
 			g_opt.debug = true;

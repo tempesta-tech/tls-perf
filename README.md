@@ -32,22 +32,26 @@ g++ -o tls-perf main.o -lpthread -lssl -lcrypto
 $ ./tls-perf --help
 
 ./tls-perf [options] <ip> <port>
-  -h,--help         Print this help and exit
-  -d,--debug        Run in debug mode
-  -q,--quet         Show less statistics in the run time
-  -l <N>            Limit parallel connections for each thread (default: 1)
-  -n <N>            Total number of handshakes to establish
-  -t <N>            Number of threads (default: 1).
-  -T,--to           Duration of the test (in seconds)
-  -c <cipher>       Force cipher choice (use `openssl ciphers` to list available cipher suites),
-  --tls <version>   Set TLS version for handshake: '1.2', '1.3' or 'any' for both (default: '1.2')
-  --tickets <mode>  Process TLS Session tickets and session resumption,
-                    'on', 'off' or 'advertise', (default: 'off')
-  --keylogfile <f>  File to dump keys for traffic analysers
+  -h,--help            Print this help and exit
+  -d,--debug           Run in debug mode
+  -q,--quet            Show less statistics in the run time
+  -l <N>               Limit parallel connections for each thread (default: 1)
+  -n <N>               Total number of handshakes to establish
+  -t <N>               Number of threads (default: 1).
+  -T,--to              Duration of the test (in seconds)
+  -c <cipher>          Force cipher choice
+                       (use `openssl ciphers` to list available cipher suites),
+  -C <curve>           Force specific curve for elliptic curve algorithms (use
+                       `openssl ecparam -list_curves` to list available curves).
+  -V,--tls <version>   Set TLS version for handshake:
+                       '1.2', '1.3' or 'any' for both (default: '1.2')
+  -K,--tickets <mode>  Process TLS Session tickets and session resumption,
+                       'on', 'off' or 'advertise', (default: 'off')
+  -F,--keylogfile <f>  File to dump keys for traffic analysers
 
 127.0.0.1:443 address is used by default.
 
-To list available ciphers run command:
+To list available ciphers on a remote peer use:
 $ nmap --script ssl-enum-ciphers -p <PORT> <IP>
 
 ```
@@ -109,5 +113,3 @@ TLS hs in progress 941 [585 h/s], TCP open conns 941 [1059 hs in progress], Erro
 `95P` parameters in resulting statistics show 95'th percentile: 95% of TLS
 handshakes per second measurements are better than the number and 95% of TLS
 handshakes require less microseconds than the number.
-
-
