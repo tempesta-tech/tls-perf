@@ -277,22 +277,22 @@ public:
 			    || g_opt.tls_vers == TLS_ANY_VERSION)
 				if (!SSL_CTX_set_ciphersuites(tls_ctx_,
 							      g_opt.cipher))
-					throw std::string("cannot set cipher");
+					throw Except("cannot set cipher");
 			if (g_opt.tls_vers == TLS1_2_VERSION
 			    || g_opt.tls_vers == TLS_ANY_VERSION)
-				if (SSL_CTX_set_cipher_list(tls_ctx_,
-							    g_opt.cipher))
-					throw std::string("cannot set cipher");
+				if (!SSL_CTX_set_cipher_list(tls_ctx_,
+							     g_opt.cipher))
+					throw Except("cannot set cipher");
 		}
 		if (g_opt.curve)
 			if (!SSL_CTX_set1_groups_list(tls_ctx_, g_opt.curve))
-				throw std::string("cannot set elliptic curve");
+				throw Except("cannot set elliptic curve");
 		SSL_CTX_set_verify(tls_ctx_, SSL_VERIFY_NONE, NULL);
 		if (g_opt.keylogfile)
 			SSL_CTX_set_keylog_callback(tls_ctx_, keylog);
 
 		if ((ed_ = epoll_create(1)) < 0)
-			throw std::string("can't create epoll");
+			throw Except("can't create epoll");
 		memset(events_, 0, sizeof(events_));
 	}
 
