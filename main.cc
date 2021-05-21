@@ -503,7 +503,7 @@ private:
 			add_to_poll();
 			break;
 		default:
-			if (!stat.tls_connections)
+			if (!stat.tot_tls_handshakes)
 				throw Except("cannot establish even one TLS"
 					     " connection");
 			stat.tls_handshakes--;
