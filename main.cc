@@ -635,7 +635,7 @@ usage() noexcept
 		<< "./tls-perf [options] <ip> <port>\n"
 		<< "  -h,--help            Print this help and exit\n"
 		<< "  -d,--debug           Run in debug mode\n"
-		<< "  -q,--quet            Show less statistics in the run time\n"
+		<< "  -q,--quiet           Show less statistics in the run time\n"
 		<< "  -l <N>               Limit parallel connections for each thread"
 		<< " (default: " << DEFAULT_PEERS << ")\n"
 		<< "  -n <N>               Total number of handshakes to establish\n"
