@@ -48,6 +48,7 @@ $ ./tls-perf --help
   -K,--tickets <mode>  Process TLS Session tickets and session resumption,
                        'on', 'off' or 'advertise', (default: 'off')
   -F,--keylogfile <f>  File to dump keys for traffic analysers
+  -s,--sni <servernameindicator>  SNI to use for the given <ip>
 
 127.0.0.1:443 address is used by default.
 
