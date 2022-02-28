@@ -80,6 +80,7 @@ struct {
 	const char		*cipher;
 	const char		*curve;
 	const char		*keylogfile;
+	const char		*sni;
 	struct sockaddr_in6	ip;
 } g_opt;
 
@@ -383,6 +384,9 @@ public:
 				SSL_set_session(ctx, sess);
 		}
 
+		if(g_opt.sni)
+			SSL_set_tlsext_host_name(ctx, g_opt.sni);
+
 		return ctx;
 	}
 };
@@ -655,7 +659,8 @@ usage() noexcept
 					   " resumption,\n"
 		<< "                       'on', 'off' or 'advertise', "
 		<< "(default: 'off')\n"
-		<< "  -F,--keylogfile <f>  File to dump keys for traffic analysers"
+		<< "  -F,--keylogfile <f>  File to dump keys for traffic analysers\n"
+		<< "  -s,--sni <servernameindicator>  SNI to use for the given <ip>"
 		<< "\n\n"
 		<< "127.0.0.1:443 address is used by default.\n"
 		<< "\n"
@@ -705,6 +710,7 @@ do_getopt(int argc, char *argv[]) noexcept
 	g_opt.cipher = NULL;
 	g_opt.curve = NULL;
 	g_opt.keylogfile = NULL;
+	g_opt.sni = NULL;
 	g_opt.debug = false;
 	g_opt.timeout = 0;
 	g_opt.tls_vers = TLS1_2_VERSION;
@@ -719,6 +725,7 @@ do_getopt(int argc, char *argv[]) noexcept
 		{"tls", required_argument, NULL, 'V'},
 		{"tickets", required_argument, NULL, 'K'},
 		{"keylogfile", required_argument, NULL, 'F'},
+		{"sni", required_argument, NULL, 's'},
 		{0, 0, 0, 0}
 	};
 
@@ -786,6 +793,9 @@ do_getopt(int argc, char *argv[]) noexcept
 			break;
 		case 'F':
 			g_opt.keylogfile = optarg;
+			break;
+		case 's':
+			g_opt.sni = optarg;
 			break;
 		case 'h':
 		default:
