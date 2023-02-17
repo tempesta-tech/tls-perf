@@ -27,6 +27,16 @@ g++ -O2 -march=native -mtune=native -Wall -DL1DSZ=64  -c main.cc -o main.o
 g++ -o tls-perf main.o -lpthread -lssl -lcrypto
 ```
 
+## Using custom openssl build
+Provide `Makefile.local` with two variables:
+```
+SSL_INCLUDE := /path/to/ssl/include/dir
+SSL_LIBDIR  := /path/to/ssl/libdir
+```
+
+This would add specified directories to compiler/linker search paths and also would
+add rpath to the resulting binary.
+
 ## Help
 ```
 $ ./tls-perf --help

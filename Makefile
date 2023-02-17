@@ -14,10 +14,18 @@
 # this program; if not, write to the Free Software Foundation, Inc., 59
 # Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
-CXX		= g++
-CFLAGS		= -O2 -march=native -mtune=native -Wall \
-		  -DL1DSZ=$(shell getconf LEVEL1_DCACHE_LINESIZE)
-LDFLAGS		= -lpthread -lssl -lcrypto
+-include Makefile.local
+CXX		:= g++
+CFLAGS		:= -O2 -march=native -mtune=native -Wall \
+		   -DL1DSZ=$(shell getconf LEVEL1_DCACHE_LINESIZE)
+ifneq ($(SSL_INCLUDE),)
+CFLAGS		:= $(CFLAGS) -I$(SSL_INCLUDE)
+endif
+
+LDFLAGS		:= -lpthread -lssl -lcrypto
+ifneq ($(SSL_LIBDIR),)
+LDFLAGS		:= -Wl,-rpath $(SSL_LIBDIR) -L $(SSL_LIBDIR) $(LDFLAGS)
+endif
 
 all : tls-perf
 

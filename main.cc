@@ -62,7 +62,7 @@ keylog(const SSL *tls, const char *line)
 	// that the given line is written at once.
 	if (bio_keylog) {
 		BIO_printf(bio_keylog, "%s\n", line);
-		BIO_flush(bio_keylog);
+		(void)(BIO_flush(bio_keylog));
 	}
 }
 
