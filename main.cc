@@ -308,15 +308,20 @@ public:
 	}
 
 	void
-	add(SocketHandler *sh)
+	add(SocketHandler *sh, int events)
 	{
 		struct epoll_event ev = {
-			.events = EPOLLIN | EPOLLOUT | EPOLLERR,
+			.events = events | EPOLLONESHOT,
 			.data = { .ptr = sh }
 		};
 
-		if (epoll_ctl(ed_, EPOLL_CTL_ADD, sh->sd, &ev) < 0)
-			throw Except("can't add socket to poller");
+		if (epoll_ctl(ed_, EPOLL_CTL_MOD, sh->sd, &ev) < 0) {
+			if (errno == ENOENT &&
+			    epoll_ctl(ed_, EPOLL_CTL_ADD, sh->sd, &ev) < 0)
+			{
+				throw Except("can't add socket to poller");
+			}
+		}
 	}
 
 	void
@@ -406,12 +411,11 @@ private:
 	SSL_SESSION		*sess_;
 	std::chrono::time_point<std::chrono::steady_clock> ts_;
 	enum _states		state_;
-	bool			polled_;
 
 public:
 	Peer(IO &io, int id) noexcept
 		: io_(io), id_(id), tls_(NULL), sess_(NULL)
-		, state_(STATE_TCP_CONNECT), polled_(false)
+		, state_(STATE_TCP_CONNECT)
 	{
 		sd = -1;
 		dbg_status("created");
@@ -448,21 +452,21 @@ public:
 
 private:
 	void
-	add_to_poll()
+	poll_for_read()
 	{
-		if (!polled_) {
-			io_.add(this);
-			polled_ = true;
-		}
+		io_.add(this, EPOLLIN | EPOLLERR);
+	}
+
+	void
+	poll_for_write()
+	{
+		io_.add(this, EPOLLOUT | EPOLLERR);
 	}
 
 	void
 	del_from_poll()
 	{
-		if (polled_) {
-			io_.del(this);
-			polled_ = false;
-		}
+		io_.del(this);
 	}
 
 	void
@@ -503,8 +507,10 @@ private:
 
 		switch (SSL_get_error(tls_, r)) {
 		case SSL_ERROR_WANT_READ:
+			poll_for_read();
+			break;
 		case SSL_ERROR_WANT_WRITE:
-			add_to_poll();
+			poll_for_write();
 			break;
 		default:
 			if (!stat.tot_tls_handshakes)
@@ -521,6 +527,7 @@ private:
 	bool
 	handle_established_tcp_conn()
 	{
+		// del_from_poll(); // not needed as we're using EPOLLONESHOT
 		dbg_status("has established TCP connection");
 		stat.tcp_handshakes--;
 		stat.tcp_connections++;
@@ -534,7 +541,8 @@ private:
 			errno = 0;
 
 			// Continue to wait on the TCP handshake.
-			add_to_poll();
+			//add_to_poll();
+			poll_for_write();
 
 			return;
 		}
