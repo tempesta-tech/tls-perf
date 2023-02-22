@@ -411,12 +411,11 @@ private:
 	SSL_SESSION		*sess_;
 	std::chrono::time_point<std::chrono::steady_clock> ts_;
 	enum _states		state_;
-	bool			polled_;
 
 public:
 	Peer(IO &io, int id) noexcept
 		: io_(io), id_(id), tls_(NULL), sess_(NULL)
-		, state_(STATE_TCP_CONNECT), polled_(false)
+		, state_(STATE_TCP_CONNECT)
 	{
 		sd = -1;
 		dbg_status("created");
