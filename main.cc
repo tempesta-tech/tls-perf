@@ -315,9 +315,9 @@ public:
 			.data = { .ptr = sh }
 		};
 
-		if (epoll_ctl(ed_, EPOLL_CTL_ADD, sh->sd, &ev) < 0) {
-			if (errno == EEXIST &&
-			    epoll_ctl(ed_, EPOLL_CTL_MOD, sh->sd, &ev) < 0)
+		if (epoll_ctl(ed_, EPOLL_CTL_MOD, sh->sd, &ev) < 0) {
+			if (errno == ENOENT &&
+			    epoll_ctl(ed_, EPOLL_CTL_ADD, sh->sd, &ev) < 0)
 			{
 				throw Except("can't add socket to poller");
 			}
@@ -452,16 +452,6 @@ public:
 	}
 
 private:
-	/*
-	void
-	add_to_poll()
-	{
-		if (!polled_) {
-			io_.add(this);
-			polled_ = true;
-		}
-	}
-	*/
 	void
 	poll_for_read()
 	{
@@ -477,10 +467,7 @@ private:
 	void
 	del_from_poll()
 	{
-		if (polled_) {
-			io_.del(this);
-			polled_ = false;
-		}
+		io_.del(this);
 	}
 
 	void
