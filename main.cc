@@ -131,8 +131,8 @@ struct {
 
 static struct {
 	std::mutex			lock;
-	std::vector<unsigned long>	stat;
-	unsigned long			acc_lat;
+	std::vector<double>		stat;
+	double				acc_lat;
 } g_lat_stat;
 
 class LatencyStat {
@@ -142,7 +142,7 @@ public:
 	{}
 
 	void
-	update(unsigned long dt) noexcept
+	update(double dt) noexcept
 	{
 		if (!dt) {
 			dbg << "Bad zero latency" << std::endl;
@@ -175,7 +175,7 @@ public:
 private:
 	unsigned int				i_;
 	unsigned int				di_;
-	std::array<unsigned long, LATENCY_N>	stat_;
+	std::array<double, LATENCY_N>		stat_;
 };
 
 static thread_local LatencyStat lat_stat __attribute__((aligned(L1DSZ)));
@@ -492,8 +492,8 @@ private:
 		int r = SSL_connect(tls_);
 		if (r == 1) {
 			auto t1(steady_clock::now());
-			auto lat = duration_cast<milliseconds>(t1 - ts_).count();
-			lat_stat.update(lat);
+			const duration<double, std::milli> lat = t1 - ts_;
+			lat_stat.update(lat.count());
 
 			dbg_status("has completed TLS handshake");
 			stat.tls_handshakes--;
